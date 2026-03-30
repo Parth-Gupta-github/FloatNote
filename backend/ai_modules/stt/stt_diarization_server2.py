@@ -27,7 +27,10 @@ try:
 except ImportError:
     _PYANNOTE_AVAILABLE = False
 
-from nlp_processor import process_text
+# Fix: keep the import package-relative so module execution resolves correctly.
+from ..utils.nlp_processor import process_text
+
+_ORIGINAL_INPUT_STREAM = sd.InputStream
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 SAMPLE_RATE = 16_000          # Hz — webrtcvad only supports 8k/16k/32k/48k
@@ -60,9 +63,8 @@ diarize_pipeline = None
 if _PYANNOTE_AVAILABLE:
     try:
         hf_login(HF_TOKEN)
-        diarize_pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization", use_auth_token=HF_TOKEN
-        )
+        # Fix: newer pyannote versions expect auth to come from `hf_login`.
+        diarize_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
         print("pyannote loaded.")
     except Exception as e:
         print(f"pyannote unavailable ({e}) — using RMS fast-path only.")
@@ -79,6 +81,7 @@ _ring_loop = collections.deque(maxlen=RING_SIZE)
 _clients: set[WebSocket] = set()
 # Last known speaker identity from pyannote (updated async in background)
 _last_speaker_info: dict = {}
+_loopback_only_mode = False
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -101,6 +104,10 @@ def float_to_pcm16(samples: np.ndarray) -> bytes:
     clipped = np.clip(samples, -1.0, 1.0)
     return (clipped * 32767).astype(np.int16).tobytes()
 
+def _system_frame_active(frame: np.ndarray) -> bool:
+    # Fix: give loopback-only mode a simple RMS fallback when VAD misses system audio speech.
+    return rms(frame) >= 0.008
+
 # ── AUDIO CALLBACKS (called from sounddevice thread) ──────────────────────────
 
 def _cb_mic(indata, frames, t, status):
@@ -118,6 +125,8 @@ def _cb_loop(indata, frames, t, status):
     if _loop is None:
         return
     data = indata[:, 0].copy()
+    if _loopback_only_mode and not _q_mic.full():
+        _loop.call_soon_threadsafe(_q_mic.put_nowait, np.zeros_like(data))
     if not _q_loop.full():
         _loop.call_soon_threadsafe(_q_loop.put_nowait, data)
 
@@ -128,6 +137,201 @@ def _device_name(index: int) -> str:
         return sd.query_devices(index)["name"]
     except Exception:
         return f"<unavailable:{index}>"
+
+def _device_info(index: int) -> dict:
+    return sd.query_devices(index)
+
+def _device_default_samplerate(index: int) -> int:
+    try:
+        return int(float(_device_info(index)["default_samplerate"]))
+    except Exception:
+        return SAMPLE_RATE
+
+def _hostapi_name(index: int) -> str:
+    try:
+        info = _device_info(index)
+        hostapi_index = int(info["hostapi"])
+        return str(sd.query_hostapis(hostapi_index)["name"])
+    except Exception:
+        return ""
+
+def _device_input_channels(index: int) -> int:
+    try:
+        return int(_device_info(index)["max_input_channels"])
+    except Exception:
+        return 1
+
+def _device_output_channels(index: int) -> int:
+    try:
+        return int(_device_info(index)["max_output_channels"])
+    except Exception:
+        return 0
+
+def _is_loopback_device(index: int) -> bool:
+    name = _device_name(index).lower()
+    return any(token in name for token in ("pc speaker", "stereo mix", "loopback", "cable output", "vb-audio"))
+
+def _is_wasapi_output_device(index: int) -> bool:
+    try:
+        info = _device_info(index)
+    except Exception:
+        return False
+    return _device_output_channels(index) > 0 and "wasapi" in _hostapi_name(index).lower()
+
+def _default_wasapi_output() -> Optional[int]:
+    # Fix: on Windows, capture YouTube/system audio from the active WASAPI output via loopback.
+    try:
+        for hostapi in sd.query_hostapis():
+            if "wasapi" in str(hostapi["name"]).lower():
+                default_output = hostapi.get("default_output_device", -1)
+                if isinstance(default_output, int) and default_output >= 0:
+                    return default_output
+    except Exception:
+        return None
+    return None
+
+def _default_wasapi_input() -> Optional[int]:
+    # Fix: pair the mic with the WASAPI host when loopback capture uses WASAPI output.
+    try:
+        for hostapi in sd.query_hostapis():
+            if "wasapi" in str(hostapi["name"]).lower():
+                default_input = hostapi.get("default_input_device", -1)
+                if isinstance(default_input, int) and default_input >= 0:
+                    return default_input
+    except Exception:
+        return None
+    return None
+
+class _NullInputStream:
+    # Fix: allow startup to continue in mic-only mode when loopback capture is unavailable.
+    def start(self):
+        return self
+
+    def stop(self):
+        return self
+
+    def close(self):
+        return self
+
+def _resample_for_pipeline(indata: np.ndarray, samplerate: int) -> np.ndarray:
+    # Fix: convert native device rates like 48 kHz down to the 16 kHz pipeline rate.
+    if samplerate == SAMPLE_RATE:
+        return indata
+
+    if len(indata) == 0:
+        return indata
+
+    target_len = max(1, round(len(indata) * SAMPLE_RATE / samplerate))
+    src_positions = np.linspace(0, len(indata) - 1, num=len(indata), dtype=np.float32)
+    dst_positions = np.linspace(0, len(indata) - 1, num=target_len, dtype=np.float32)
+
+    if indata.ndim == 1:
+        return np.interp(dst_positions, src_positions, indata).astype(np.float32)
+
+    channels = [
+        np.interp(dst_positions, src_positions, indata[:, ch]).astype(np.float32)
+        for ch in range(indata.shape[1])
+    ]
+    return np.stack(channels, axis=1)
+
+def _wrap_input_callback(callback, samplerate: int):
+    # Fix: adapt incoming stream frames to the pipeline sample rate before queueing them.
+    if samplerate == SAMPLE_RATE:
+        return callback
+
+    def _wrapped(indata, frames, t, status):
+        resampled = _resample_for_pipeline(indata, samplerate)
+        callback(resampled, len(resampled), t, status)
+
+    return _wrapped
+
+def _open_input_stream(device: int, callback, preferred_channels: int = 1) -> sd.InputStream:
+    # Fix: probe a few valid channel/rate combinations before opening the stream.
+    is_wasapi_loopback = _is_wasapi_output_device(device)
+    max_channels = max(1, _device_output_channels(device) if is_wasapi_loopback else _device_input_channels(device))
+    native_samplerate = _device_default_samplerate(device)
+    channel_options = []
+    for channels in (preferred_channels, min(2, max_channels), 1):
+        if 1 <= channels <= max_channels and channels not in channel_options:
+            channel_options.append(channels)
+
+    samplerates = []
+    for samplerate in (native_samplerate, SAMPLE_RATE, 48_000, 44_100):
+        if samplerate not in samplerates:
+            samplerates.append(samplerate)
+
+    if is_wasapi_loopback:
+        # Fix: use the exact WASAPI loopback stream pattern that works on this machine.
+        stream_callback = _wrap_input_callback(callback, native_samplerate)
+        for channels in channel_options:
+            try:
+                return _ORIGINAL_INPUT_STREAM(
+                    samplerate=native_samplerate,
+                    channels=channels,
+                    dtype="float32",
+                    blocksize=512,
+                    device=device,
+                    callback=stream_callback,
+                    extra_settings=sd.WasapiSettings(loopback=True),
+                )
+            except Exception:
+                continue
+
+    for samplerate in samplerates:
+        for channels in channel_options:
+            try:
+                if "pc speaker" in _device_name(device).lower():
+                    return _ORIGINAL_INPUT_STREAM(
+                        samplerate=native_samplerate,
+                        channels=max(2, channels),
+                        dtype="float32",
+                        blocksize=512,
+                        device=device,
+                        callback=_wrap_input_callback(callback, native_samplerate),
+                    )
+                extra_settings = None
+                stream_callback = _wrap_input_callback(callback, samplerate)
+                stream_blocksize = max(1, round(BLOCKSIZE * samplerate / SAMPLE_RATE))
+                sd.check_input_settings(device=device, samplerate=samplerate, channels=channels, dtype="float32", extra_settings=extra_settings)
+                return _ORIGINAL_INPUT_STREAM(
+                    samplerate=samplerate,
+                    channels=channels,
+                    dtype="float32",
+                    blocksize=stream_blocksize,
+                    device=device,
+                    callback=stream_callback,
+                    latency="low",
+                    extra_settings=extra_settings,
+                )
+            except Exception:
+                continue
+
+    raise RuntimeError(f"Unable to open input device #{device} ({_device_name(device)})")
+
+def _patched_input_stream(*args, **kwargs):
+    # Fix: let the existing startup code retry safer formats for input devices automatically.
+    if args:
+        return _ORIGINAL_INPUT_STREAM(*args, **kwargs)
+
+    device = kwargs.get("device")
+    callback = kwargs.get("callback")
+    if device is None or callback is None:
+        return _ORIGINAL_INPUT_STREAM(*args, **kwargs)
+
+    if _loopback_only_mode and callback is _cb_mic:
+        return _NullInputStream()
+
+    preferred_channels = int(kwargs.get("channels", 1))
+    try:
+        return _open_input_stream(device, callback, preferred_channels=preferred_channels)
+    except Exception:
+        if _is_loopback_device(device):
+            print(f"Loopback device #{device} could not be opened â€” continuing with mic only.")
+            return _NullInputStream()
+        raise
+
+# Fix: route later `sd.InputStream(...)` calls through the compatibility wrapper above.
+sd.InputStream = _patched_input_stream
 
 def _env_device(name: str) -> Optional[int]:
     raw = os.getenv(name)
@@ -144,7 +348,8 @@ def find_loopback() -> Optional[int]:
     if forced is not None:
         return forced
 
-    preferred_tokens = ("cable output", "vb-audio", "stereo mix", "loopback")
+    # Fix: prefer the Realtek speaker-capture input that actually opens on this machine.
+    preferred_tokens = ("pc speaker", "cable output", "vb-audio", "stereo mix", "loopback")
     candidates = []
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] <= 0:
@@ -163,6 +368,10 @@ def default_input() -> int:
     forced = _env_device("FLOATNOTE_MIC_DEVICE")
     if forced is not None:
         return forced
+
+    wasapi_input = _default_wasapi_input()
+    if wasapi_input is not None:
+        return wasapi_input
 
     preferred_tokens = ("microphone", "mic input", "microphone array", "headset mic")
     excluded_tokens = ("stereo mix", "loopback", "cable output", "vb-audio")
@@ -233,9 +442,12 @@ async def vad_segmenter():
             buf_mic  = buf_mic[frame_samples:]
             buf_loop = buf_loop[frame_samples:]
 
-            mixed_frame = (frm_mic + frm_loop) / 2.0
+            # Fix: in loopback-only mode, drive VAD from system audio instead of averaging it with silence.
+            mixed_frame = frm_loop if _loopback_only_mode else (frm_mic + frm_loop) / 2.0
             pcm16       = float_to_pcm16(mixed_frame)
             is_speech   = is_speech_frame(pcm16)
+            if _loopback_only_mode:
+                is_speech = is_speech or _system_frame_active(frm_loop)
 
             if is_speech:
                 in_speech     = True
@@ -266,8 +478,14 @@ async def _emit_segment(mic_frames: list, loop_frames: list):
     if duration_ms < MIN_SPEECH_MS:
         return
 
-    mixed = (mic_np + loop_np) / 2.0
+    # Fix: keep system-audio chunks at full strength in loopback-only mode.
+    mixed = loop_np.copy() if _loopback_only_mode else (mic_np + loop_np) / 2.0
     mixed -= mixed.mean()  # remove DC offset
+
+    print(
+        f"[CHUNK] frames={len(mic_frames)} duration={round(duration_ms / 1000, 2)}s "
+        f"loop_rms={rms(loop_np):.4f} mic_rms={rms(mic_np):.4f} loopback_only={_loopback_only_mode}"
+    )
 
     # Run ASR + source attribution concurrently
     loop = asyncio.get_running_loop()
@@ -277,10 +495,12 @@ async def _emit_segment(mic_frames: list, loop_frames: list):
     text, source = await asyncio.gather(asr_task, src_task)
     text = text.strip()
     if len(text) < 2:
+        print("[CHUNK] dropped: transcription was empty or too short")
         return
 
     speaker = _last_speaker_info.get("label", "S0")
-    processed = process_text(text, speaker=f"{speaker}_{source}")
+    # Fix: `process_text` currently accepts only the transcript text.
+    processed = process_text(text)
 
     payload = {
         "text":     text,
@@ -372,7 +592,7 @@ def _run_diarize(mixed: np.ndarray, mic: np.ndarray, loop: np.ndarray) -> list[d
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _loop
+    global _loop, _loopback_only_mode
     _loop = asyncio.get_running_loop()
 
     mic_dev  = default_input()
@@ -385,6 +605,11 @@ async def lifespan(app: FastAPI):
         print("No loopback found — mic only.")
 
     streams = []
+    loopback_only_candidate = loop_dev is not None and "pc speaker" in _device_name(loop_dev).lower()
+    if loopback_only_candidate:
+        # Fix: Realtek PC Speaker capture conflicts with the mic on this machine, so use system-audio-only mode.
+        _loopback_only_mode = True
+        print("Using loopback-only mode for system audio capture.")
 
     mic_stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -417,6 +642,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        _loopback_only_mode = False
         for s in streams:
             s.stop()
             s.close()

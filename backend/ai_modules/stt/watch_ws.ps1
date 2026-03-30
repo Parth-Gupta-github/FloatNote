@@ -32,7 +32,23 @@ try {
         $message = [Text.Encoding]::UTF8.GetString($stream.ToArray())
         Write-Host ""
         Write-Host "----- MESSAGE -----"
-        Write-Host $message
+        try {
+            $obj = $message | ConvertFrom-Json
+            $speaker = if ($obj.speaker) { $obj.speaker } else { "unknown" }
+            $source = if ($obj.source) { $obj.source } else { "unknown" }
+            $duration = if ($obj.duration) { $obj.duration } else { 0 }
+            Write-Host ("speaker={0} source={1} duration={2}s" -f $speaker, $source, $duration)
+            Write-Host ("text: {0}" -f $obj.text)
+            if ($obj.actions -and $obj.actions.Count -gt 0) {
+                Write-Host ("actions: {0}" -f ($obj.actions -join "; "))
+            }
+            else {
+                Write-Host "actions: []"
+            }
+        }
+        catch {
+            Write-Host $message
+        }
     }
 }
 finally {
