@@ -127,6 +127,9 @@ class OCRProcessor:
                     seen.add(normalized)
                     keywords.append(token.text)
 
+        if len(keywords) <= 6:
+            return keywords
+
         return filter_keywords(keywords)
 
     def process(self) -> Dict[str, List[str] | str]:
