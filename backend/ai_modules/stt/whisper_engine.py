@@ -1,30 +1,17 @@
 import asyncio
 import os
-import sys
 from collections import deque
 from contextlib import asynccontextmanager
 
 import numpy as np
 import sounddevice as sd
 import whisper
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-from ai_modules.chatbot.chatbot import ask_question, convert_to_documents, create_vector_store
-from ai_modules.summarizer.summarizer import summarize_meeting
-from database.crud import (
-    create_new_meeting,
-    get_latest_meeting_data,
-    get_meeting_data,
-    init_db,
-    save_meeting_summary,
-    save_to_database,
-)
+from database.crud import create_new_meeting, init_db, save_to_database
 
-utils_path = os.path.join(os.path.dirname(__file__), "../utils")
-sys.path.insert(0, utils_path)
-from nlp_processor import process_text
+from ai_modules.utils.nlp_processor import process_text
 from ai_modules.ocr.ocr_processor import OCRProcessor
 
 os.environ.setdefault("ENABLE_OCR", "true")
@@ -50,23 +37,6 @@ db_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 active_meeting_id: int | None = None
 
 
-class ChatRequest(BaseModel):
-    question: str
-
-
-async def load_meeting_payload(meeting_id: int | None = None) -> dict:
-    meeting_payload = (
-        await get_meeting_data(meeting_id)
-        if meeting_id is not None
-        else await get_latest_meeting_data()
-    )
-    if meeting_payload is None:
-        raise HTTPException(status_code=404, detail="Meeting not found.")
-    if not meeting_payload["items"]:
-        raise HTTPException(status_code=400, detail="Meeting has no captured data yet.")
-    return meeting_payload
-
-
 async def database_worker_loop():
     print("💾 Database worker started. Waiting for live data...")
     while True:
@@ -85,7 +55,7 @@ async def database_worker_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    print("🗄️  Database initialized")
+    print("🗄️ Database initialized")
     global loop, stream, ocr_processor
     loop = asyncio.get_running_loop()
     stream = sd.InputStream(
@@ -102,7 +72,7 @@ async def lifespan(app: FastAPI):
             change_threshold=float(os.getenv("OCR_CHANGE_THRESHOLD", "0.02")),
         )
         print(
-            f"🖥️  OCR enabled | monitor_index={ocr_processor.monitor_index} "
+            f"🖥️ OCR enabled | monitor_index={ocr_processor.monitor_index} "
             f"interval={ocr_processor.check_interval}s"
         )
     else:
@@ -193,6 +163,12 @@ async def websocket_endpoint(ws: WebSocket):
             audio_np = np.array(buffer, dtype=np.float32)[:CHUNK_SIZE]
             current_volume = float(np.sqrt(np.mean(audio_np**2)))
 
+            if current_volume > 0.0005:
+                print(
+                    f"🔊 [DEBUG] Mic Volume: {current_volume:.5f} "
+                    f"(Required: > {SILENCE_RMS_THRESHOLD})"
+                )
+
             if current_volume <= SILENCE_RMS_THRESHOLD:
                 for _ in range(min(CHUNK_SIZE // 4, len(buffer))):
                     try:
@@ -210,6 +186,7 @@ async def websocket_endpoint(ws: WebSocket):
                 )
 
             try:
+                print("🧠 [DEBUG] Sending to Whisper for processing...")
                 result = await loop.run_in_executor(None, _transcribe)
             except Exception as transcribe_err:
                 print(f"⚠️ Whisper error: {transcribe_err}")
@@ -233,6 +210,12 @@ async def websocket_endpoint(ws: WebSocket):
             )
             analysis["ocr"] = ocr_result
             analysis["meeting_id"] = active_meeting_id
+
+            print(
+                f"📤 Broadcasting text='{text[:60]}' | "
+                f"ocr_len={len(ocr_result['text'])} "
+                f"ocr_keywords={ocr_result['keywords'][:3]}"
+            )
 
             try:
                 await db_queue.put(
@@ -266,58 +249,6 @@ async def websocket_endpoint(ws: WebSocket):
             active_meeting_id = None
             print("🔁 Active meeting closed. Next connection will create a new meeting.")
         print(f"🔴 Client disconnected. Active: {len(clients)}")
-
-
-@app.get("/meetings/latest/summary")
-async def get_latest_meeting_summary():
-    meeting_payload = await load_meeting_payload()
-    summary = summarize_meeting(meeting_payload["items"])
-    await save_meeting_summary(meeting_payload["meeting_id"], summary)
-    return {
-        "meeting_id": meeting_payload["meeting_id"],
-        "title": meeting_payload["title"],
-        "summary": summary,
-    }
-
-
-@app.get("/meetings/{meeting_id}/summary")
-async def get_meeting_summary(meeting_id: int):
-    meeting_payload = await load_meeting_payload(meeting_id)
-    summary = summarize_meeting(meeting_payload["items"])
-    await save_meeting_summary(meeting_id, summary)
-    return {
-        "meeting_id": meeting_payload["meeting_id"],
-        "title": meeting_payload["title"],
-        "summary": summary,
-    }
-
-
-@app.post("/meetings/latest/chat")
-async def chat_with_latest_meeting(request: ChatRequest):
-    meeting_payload = await load_meeting_payload()
-    docs = convert_to_documents(meeting_payload["items"])
-    vector_db = create_vector_store(docs)
-    answer = ask_question(request.question, vector_db)
-    return {
-        "meeting_id": meeting_payload["meeting_id"],
-        "title": meeting_payload["title"],
-        "question": request.question,
-        "answer": answer,
-    }
-
-
-@app.post("/meetings/{meeting_id}/chat")
-async def chat_with_meeting(meeting_id: int, request: ChatRequest):
-    meeting_payload = await load_meeting_payload(meeting_id)
-    docs = convert_to_documents(meeting_payload["items"])
-    vector_db = create_vector_store(docs)
-    answer = ask_question(request.question, vector_db)
-    return {
-        "meeting_id": meeting_payload["meeting_id"],
-        "title": meeting_payload["title"],
-        "question": request.question,
-        "answer": answer,
-    }
 
 
 async def ping_client(ws: WebSocket):
