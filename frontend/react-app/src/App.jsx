@@ -1,7 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import SettingsModal from "./SettingsModal";
-import HistoryPanel from "./HistoryPanel";
-import { exportMeeting } from "./exportMeeting";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const WS_BASE_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws";
@@ -13,19 +10,6 @@ function App() {
   const [actions, setActions] = useState([]);
   const [ocr, setOcr] = useState({ text: "", keywords: [] });
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
-  const [connected, setConnected] = useState(false);
-  const [loadingTip, setLoadingTip] = useState(0);
-  // Meeting control + privacy state (mirrors the backend status broadcasts).
-  const [recording, setRecording] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const [micMuted, setMicMuted] = useState(false);
-  const [speakerMuted, setSpeakerMuted] = useState(false);
-  const [speakerEnabled, setSpeakerEnabled] = useState(false);
-  const [titleInput, setTitleInput] = useState("");
-  const [activeTitle, setActiveTitle] = useState("");
-  const [controlBusy, setControlBusy] = useState(false);
-  // speaker_key -> display name (from saved aliases, if any).
-  const [speakerNames, setSpeakerNames] = useState({});
   const [summary, setSummary] = useState("");
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState("");
@@ -33,17 +17,6 @@ function App() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState("");
   const [chatHistory, setChatHistory] = useState([]);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
-
-  const currentMeetingData = () => ({
-    title: activeTitle || titleInput || "FloatNote Meeting",
-    transcript,
-    keywords,
-    actions,
-    summary,
-    speakerNames,
-  });
   const wsRef = useRef(null);
   const transcriptRef = useRef(null);
   const chatRef = useRef(null);
@@ -68,13 +41,6 @@ function App() {
     }
   }, [chatHistory, chatLoading]);
 
-  // Cycle the connecting-screen status lines while we wait for the socket.
-  useEffect(() => {
-    if (connected) return;
-    const id = setInterval(() => setLoadingTip((t) => t + 1), 1800);
-    return () => clearInterval(id);
-  }, [connected]);
-
   useEffect(() => {
     let reconnectTimer = null;
     let isUnmounted = false;
@@ -85,7 +51,6 @@ function App() {
 
       ws.onopen = () => {
         setConnectionStatus("🟢 Connected");
-        setConnected(true);
         console.log("✅ Connected - waiting handshake");
       };
 
@@ -96,20 +61,6 @@ function App() {
           if (data.type === "connected") {
             setMeetingId(data.meeting_id ?? null);
             setConnectionStatus("🟢 Connected");
-            return;
-          }
-
-          if (data.type === "status") {
-            applyStatus(data);
-            setConnectionStatus("🟢 Connected");
-            return;
-          }
-
-          if (data.type === "speaker_renamed") {
-            setSpeakerNames((prev) => ({
-              ...prev,
-              [data.speaker_key]: data.display_name,
-            }));
             return;
           }
 
@@ -174,7 +125,6 @@ function App() {
       ws.onclose = () => {
         if (isUnmounted) return;
         setConnectionStatus("🔴 Disconnected");
-        setConnected(false);
         reconnectTimer = setTimeout(() => {
           console.log("🔄 Reconnecting...");
           connect();
@@ -183,7 +133,6 @@ function App() {
 
       ws.onerror = (error) => {
         setConnectionStatus("❌ Error");
-        setConnected(false);
         console.error("WebSocket error:", error);
       };
     };
@@ -200,140 +149,6 @@ function App() {
       }
     };
   }, []);
-
-  function applyStatus(s) {
-    if (typeof s.recording === "boolean") setRecording(s.recording);
-    if (typeof s.paused === "boolean") setPaused(s.paused);
-    if (typeof s.mic_muted === "boolean") setMicMuted(s.mic_muted);
-    if (typeof s.speaker_muted === "boolean") setSpeakerMuted(s.speaker_muted);
-    if (typeof s.speaker_enabled === "boolean") setSpeakerEnabled(s.speaker_enabled);
-    setMeetingId(s.meeting_id ?? null);
-    setActiveTitle(s.title || "");
-  }
-
-  async function postControl(path, body) {
-    const response = await fetch(`${API_BASE_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.detail || "Control request failed.");
-    }
-    return data;
-  }
-
-  async function fetchAliases(id) {
-    if (!id) return;
-    try {
-      const response = await fetch(`${API_BASE_URL}/meetings/${id}/speakers`);
-      const data = await response.json();
-      if (response.ok) setSpeakerNames(data.aliases || {});
-    } catch (error) {
-      console.error("Alias fetch error:", error);
-    }
-  }
-
-  async function handleStart() {
-    setControlBusy(true);
-    try {
-      // Fresh meeting → wipe ALL previous-meeting state so nothing carries over
-      // (transcript, keywords, actions, OCR, summary, chat history + errors).
-      clearAll();
-      setSpeakerNames({});
-      setMeetingId(null);
-      const data = await postControl("/meetings/start", {
-        title: titleInput,
-        capture_speaker: true,
-      });
-      applyStatus(data);
-    } catch (error) {
-      console.error("Start error:", error);
-    } finally {
-      setControlBusy(false);
-    }
-  }
-
-  async function handlePauseResume() {
-    setControlBusy(true);
-    try {
-      applyStatus(await postControl(paused ? "/meetings/resume" : "/meetings/pause"));
-    } catch (error) {
-      console.error("Pause/resume error:", error);
-    } finally {
-      setControlBusy(false);
-    }
-  }
-
-  async function handleStop() {
-    setControlBusy(true);
-    try {
-      await postControl("/meetings/stop");
-      setRecording(false);
-      setPaused(false);
-    } catch (error) {
-      console.error("Stop error:", error);
-    } finally {
-      setControlBusy(false);
-    }
-  }
-
-  async function toggleMute(source) {
-    const muted = source === "mic" ? !micMuted : !speakerMuted;
-    try {
-      applyStatus(await postControl("/meetings/mute", { source, muted }));
-    } catch (error) {
-      console.error("Mute error:", error);
-    }
-  }
-
-  async function commitTitle() {
-    if (!recording) return;
-    try {
-      applyStatus(
-        await postControl("/meetings/title", {
-          title: activeTitle.trim() || "Live FloatNote Meeting",
-        })
-      );
-    } catch (error) {
-      console.error("Title update error:", error);
-    }
-  }
-
-  // Pull saved speaker names whenever an active meeting is established.
-  useEffect(() => {
-    if (meetingId) fetchAliases(meetingId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meetingId]);
-
-  function speakerLabel(source) {
-    if (!source || source === "MIC") return "🎤 You";
-    if (speakerNames[source]) return `🔊 ${speakerNames[source]}`;
-    const m = /^SPEAKER_(\d+)$/.exec(source);
-    if (m) return `🔊 Participant ${parseInt(m[1], 10) + 1}`;
-    return `🔊 ${source}`;
-  }
-
-  const SPEAKER_PALETTE = [
-    { border: "border-violet-300", bg: "from-slate-50 to-violet-50", chip: "bg-violet-100 text-violet-700" },
-    { border: "border-emerald-300", bg: "from-slate-50 to-emerald-50", chip: "bg-emerald-100 text-emerald-700" },
-    { border: "border-amber-300", bg: "from-slate-50 to-amber-50", chip: "bg-amber-100 text-amber-700" },
-    { border: "border-rose-300", bg: "from-slate-50 to-rose-50", chip: "bg-rose-100 text-rose-700" },
-    { border: "border-cyan-300", bg: "from-slate-50 to-cyan-50", chip: "bg-cyan-100 text-cyan-700" },
-  ];
-  const MIC_STYLE = {
-    border: "border-sky-300",
-    bg: "from-slate-50 to-sky-50",
-    chip: "bg-sky-100 text-sky-700",
-  };
-
-  function speakerStyle(source) {
-    if (!source || source === "MIC") return MIC_STYLE;
-    const m = /^SPEAKER_(\d+)$/.exec(source);
-    const idx = m ? parseInt(m[1], 10) : 0;
-    return SPEAKER_PALETTE[idx % SPEAKER_PALETTE.length];
-  }
 
   async function fetchSummary() {
     if (summaryRequestInFlightRef.current) {
@@ -448,85 +263,6 @@ function App() {
     setChatHistory([]);
   };
 
-  if (!connected) {
-    const tips = [
-      "Waking up the meeting engine…",
-      "Warming up Whisper transcription…",
-      "Tuning microphone & system audio…",
-      "Calibrating speaker diarization…",
-      "Almost ready for your meeting…",
-    ];
-    return (
-      <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[radial-gradient(circle_at_top,_#fef3c7_0%,_#fff7ed_28%,_#e0f2fe_64%,_#dbeafe_100%)] p-6">
-        <style>{`
-          @keyframes fnEq { 0%,100% { transform: scaleY(0.25); } 50% { transform: scaleY(1); } }
-          @keyframes fnFloat { 0%,100% { transform: translate(0,0); } 50% { transform: translate(14px,-26px); } }
-          @keyframes fnShimmer { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
-          @keyframes fnRing { 0% { transform: scale(0.55); opacity: 0.7; } 100% { transform: scale(2.3); opacity: 0; } }
-          @keyframes fnFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-        `}</style>
-
-        {/* Ambient floating glows */}
-        <div className="pointer-events-none absolute -left-12 top-1/4 h-44 w-44 rounded-full bg-sky-300/40 blur-3xl" style={{ animation: "fnFloat 9s ease-in-out infinite" }} />
-        <div className="pointer-events-none absolute right-0 top-8 h-56 w-56 rounded-full bg-amber-300/40 blur-3xl" style={{ animation: "fnFloat 11s ease-in-out infinite reverse" }} />
-        <div className="pointer-events-none absolute bottom-0 left-1/3 h-60 w-60 rounded-full bg-violet-300/40 blur-3xl" style={{ animation: "fnFloat 13s ease-in-out infinite" }} />
-
-        <div className="relative z-10 flex w-full max-w-md flex-col items-center gap-8 rounded-[2.5rem] border border-white/70 bg-white/60 px-10 py-14 text-center shadow-[0_30px_90px_rgba(15,23,42,0.18)] backdrop-blur-2xl">
-          <p className="text-xs font-semibold uppercase tracking-[0.4em] text-sky-700">
-            Real-Time AI Meeting Assistant
-          </p>
-
-          {/* Mic orb radiating sound rings */}
-          <div className="relative flex h-28 w-28 items-center justify-center">
-            <span className="absolute h-full w-full rounded-full border-2 border-sky-400/50" style={{ animation: "fnRing 2.4s ease-out infinite" }} />
-            <span className="absolute h-full w-full rounded-full border-2 border-violet-400/50" style={{ animation: "fnRing 2.4s ease-out 0.8s infinite" }} />
-            <span className="absolute h-full w-full rounded-full border-2 border-amber-400/50" style={{ animation: "fnRing 2.4s ease-out 1.6s infinite" }} />
-            <div className="flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 via-violet-500 to-amber-400 text-3xl shadow-lg shadow-violet-500/30">
-              🎙️
-            </div>
-          </div>
-
-          <h1
-            className="bg-gradient-to-r from-sky-600 via-violet-600 to-amber-500 bg-[length:200%_auto] bg-clip-text font-serif text-4xl font-black tracking-tight text-transparent"
-            style={{ animation: "fnShimmer 3s linear infinite" }}
-          >
-            FloatNote AI
-          </h1>
-
-          {/* Live audio equalizer */}
-          <div className="flex h-12 items-end gap-1.5">
-            {[0, 0.18, 0.36, 0.12, 0.3, 0.06, 0.24, 0.42].map((delay, i) => (
-              <span
-                key={i}
-                className="w-2.5 rounded-full bg-gradient-to-t from-sky-500 to-violet-500"
-                style={{
-                  height: "100%",
-                  transformOrigin: "bottom",
-                  animation: `fnEq 1s ease-in-out ${delay}s infinite`,
-                }}
-              />
-            ))}
-          </div>
-
-          <div className="flex items-center gap-3">
-            <span className="h-2.5 w-2.5 animate-ping rounded-full bg-amber-500" />
-            <span
-              key={loadingTip}
-              className="text-base font-medium text-slate-700"
-              style={{ animation: "fnFade 0.5s ease-out" }}
-            >
-              {tips[loadingTip % tips.length]}
-            </span>
-          </div>
-
-          <p className="text-xs text-slate-400">
-            🔒 Connecting securely on your device · localhost:8000
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#fef3c7_0%,_#fff7ed_28%,_#e0f2fe_64%,_#dbeafe_100%)] p-6 md:p-8">
       <div className="mx-auto max-w-7xl">
@@ -543,34 +279,6 @@ function App() {
                 Live transcript, OCR capture, meeting summary, and grounded
                 chatbot answers from the same saved meeting stream.
               </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  onClick={() => setHistoryOpen(true)}
-                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
-                >
-                  🕘 History
-                </button>
-                <button
-                  onClick={() => setSettingsOpen(true)}
-                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
-                >
-                  ⚙️ Settings
-                </button>
-                <button
-                  onClick={() => exportMeeting("md", currentMeetingData())}
-                  disabled={transcript.length === 0}
-                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  ⬇️ Export .md
-                </button>
-                <button
-                  onClick={() => exportMeeting("txt", currentMeetingData())}
-                  disabled={transcript.length === 0}
-                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  ⬇️ .txt
-                </button>
-              </div>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
@@ -592,119 +300,6 @@ function App() {
           </div>
         </div>
 
-        <div className="mb-8 rounded-[2rem] border border-white/70 bg-white/75 p-6 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
-              <span
-                className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ${
-                  recording && !paused
-                    ? "bg-rose-100 text-rose-700"
-                    : paused
-                      ? "bg-amber-100 text-amber-700"
-                      : "bg-slate-200 text-slate-600"
-                }`}
-              >
-                <span
-                  className={`h-2.5 w-2.5 rounded-full ${
-                    recording && !paused ? "animate-pulse bg-rose-500" : paused ? "bg-amber-500" : "bg-slate-400"
-                  }`}
-                />
-                {recording ? (paused ? "PAUSED" : "🔴 REC") : "IDLE"}
-              </span>
-
-              {recording ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    value={activeTitle}
-                    onChange={(e) => setActiveTitle(e.target.value)}
-                    onBlur={commitTitle}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") e.currentTarget.blur();
-                    }}
-                    placeholder="Meeting title"
-                    className="w-full max-w-xs rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm focus:border-sky-400 focus:outline-none"
-                  />
-                  {meetingId ? (
-                    <span className="text-sm font-medium text-slate-500">
-                      #{meetingId}
-                    </span>
-                  ) : null}
-                </div>
-              ) : (
-                <input
-                  value={titleInput}
-                  onChange={(e) => setTitleInput(e.target.value)}
-                  placeholder="Meeting title (optional)"
-                  className="w-full max-w-xs rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm focus:border-sky-400 focus:outline-none"
-                />
-              )}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              {recording && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => toggleMute("mic")}
-                    className={`rounded-2xl px-4 py-2 text-sm font-semibold shadow-sm transition-all ${
-                      micMuted ? "bg-slate-200 text-slate-500" : "bg-sky-100 text-sky-700"
-                    }`}
-                  >
-                    {micMuted ? "🎤 Mic off" : "🎤 Mic on"}
-                  </button>
-                  {speakerEnabled && (
-                    <button
-                      type="button"
-                      onClick={() => toggleMute("speaker")}
-                      className={`rounded-2xl px-4 py-2 text-sm font-semibold shadow-sm transition-all ${
-                        speakerMuted ? "bg-slate-200 text-slate-500" : "bg-violet-100 text-violet-700"
-                      }`}
-                    >
-                      {speakerMuted ? "🔊 Participants off" : "🔊 Participants on"}
-                    </button>
-                  )}
-                </>
-              )}
-
-              {!recording ? (
-                <button
-                  type="button"
-                  onClick={handleStart}
-                  disabled={controlBusy}
-                  className="rounded-2xl bg-gradient-to-r from-emerald-500 to-green-600 px-6 py-3 font-semibold text-white shadow-lg transition-all hover:-translate-y-0.5 hover:shadow-xl disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  ▶️ Start Meeting
-                </button>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={handlePauseResume}
-                    disabled={controlBusy}
-                    className="rounded-2xl bg-gradient-to-r from-amber-400 to-orange-500 px-5 py-3 font-semibold text-slate-950 shadow-lg transition-all hover:-translate-y-0.5 hover:shadow-xl disabled:opacity-60"
-                  >
-                    {paused ? "▶️ Resume" : "⏸️ Pause"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleStop}
-                    disabled={controlBusy}
-                    className="rounded-2xl bg-gradient-to-r from-rose-500 to-rose-600 px-5 py-3 font-semibold text-white shadow-lg transition-all hover:-translate-y-0.5 hover:shadow-xl disabled:opacity-60"
-                  >
-                    ⏹️ Stop
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-          {!recording && (
-            <p className="mt-3 text-xs text-slate-500">
-              🔒 Nothing is captured until you press Start. Your mic and participants’
-              system audio are both captured — toggle either off anytime while recording.
-            </p>
-          )}
-        </div>
-
         <div className="grid grid-cols-1 gap-8 xl:grid-cols-[1.5fr_0.9fr]">
           <div className="space-y-8">
             <section className="rounded-[2rem] border border-white/70 bg-white/75 p-7 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
@@ -712,14 +307,8 @@ function App() {
                 <h2 className="text-2xl font-bold text-slate-900">
                   📝 Live Transcript
                 </h2>
-                <span
-                  className={`rounded-full px-4 py-1 text-sm font-semibold ${
-                    recording && !paused
-                      ? "bg-rose-100 text-rose-700"
-                      : "bg-slate-100 text-slate-500"
-                  }`}
-                >
-                  {recording ? (paused ? "PAUSED" : "LIVE STREAM") : "IDLE"}
+                <span className="rounded-full bg-sky-100 px-4 py-1 text-sm font-semibold text-sky-700">
+                  LIVE STREAM
                 </span>
               </div>
 
@@ -728,17 +317,24 @@ function App() {
                 className="h-[360px] space-y-3 overflow-y-auto pr-2"
               >
                 {transcript.map((entry, index) => {
-                  const source = entry.source || "MIC";
-                  const style = speakerStyle(source);
+                  const isSpeaker = entry.source === "SPEAKER";
                   return (
                     <div
                       key={`${entry.text}-${index}`}
-                      className={`rounded-[1.5rem] border-l-4 p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${style.border} bg-gradient-to-r ${style.bg}`}
+                      className={`rounded-[1.5rem] border-l-4 p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${
+                        isSpeaker
+                          ? "border-violet-300 bg-gradient-to-r from-slate-50 to-violet-50"
+                          : "border-sky-300 bg-gradient-to-r from-slate-50 to-sky-50"
+                      }`}
                     >
                       <span
-                        className={`mb-2 inline-flex items-center gap-1 rounded-full px-3 py-0.5 text-xs font-semibold uppercase tracking-wide ${style.chip}`}
+                        className={`mb-2 inline-flex items-center gap-1 rounded-full px-3 py-0.5 text-xs font-semibold uppercase tracking-wide ${
+                          isSpeaker
+                            ? "bg-violet-100 text-violet-700"
+                            : "bg-sky-100 text-sky-700"
+                        }`}
                       >
-                        {speakerLabel(source)}
+                        {isSpeaker ? "🔊 Participant" : "🎤 You"}
                       </span>
                       <p className="text-left leading-7 text-slate-700">
                         {entry.text}
@@ -752,9 +348,7 @@ function App() {
                     <div className="text-center">
                       <div className="mx-auto mb-4 h-16 w-16 animate-spin rounded-full border-4 border-dashed border-slate-300" />
                       <p className="text-lg font-medium">
-                        {recording
-                          ? "Listening for live speech..."
-                          : "Press Start to begin the meeting."}
+                        Listening for live speech...
                       </p>
                     </div>
                   </div>
@@ -1000,13 +594,6 @@ function App() {
           </div>
         </div>
       </div>
-
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <HistoryPanel
-        open={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        apiBase={API_BASE_URL}
-      />
     </div>
   );
 }
