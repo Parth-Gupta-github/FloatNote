@@ -4,15 +4,25 @@ import re
 from typing import List
 
 from dotenv import load_dotenv
-from google import genai
-from groq import Groq
+
+# Optional providers: missing packages must not crash the server —
+# filtering falls back to Groq, then to local dedup.
+try:
+    from google import genai
+except ImportError:
+    genai = None
+
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if (genai and GEMINI_API_KEY) else None
+groq_client = Groq(api_key=GROQ_API_KEY) if (Groq and GROQ_API_KEY) else None
 
 STOPWORDS = {
     "the",
