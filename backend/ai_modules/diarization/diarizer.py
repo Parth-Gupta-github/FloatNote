@@ -30,6 +30,8 @@ _encoder = None
 _encoder_lock = threading.Lock()
 # meeting_id -> list of {"label": str, "centroid": np.ndarray, "count": int}
 _meetings: dict[int, list[dict]] = {}
+# meeting_id -> most recently assigned label (sticky fallback for short audio)
+_last_label: dict[int, str] = {}
 _state_lock = threading.Lock()
 
 
@@ -46,26 +48,35 @@ def reset_meeting(meeting_id: int) -> None:
     """Drop accumulated speaker centroids for a finished meeting."""
     with _state_lock:
         _meetings.pop(meeting_id, None)
+        _last_label.pop(meeting_id, None)
+
+
+def _fallback_label(meeting_id: int, base_label: str) -> str:
+    """Sticky fallback: too-short utterances keep the last speaker's label
+    instead of flipping to a bare base label, so the UI never shows two
+    different names for the same voice."""
+    with _state_lock:
+        return _last_label.get(meeting_id, f"{base_label}_00")
 
 
 def assign_speaker(audio_16k, meeting_id: int, base_label: str = "SPEAKER") -> str:
     """Return a stable speaker label for this utterance within the meeting.
 
-    Falls back to ``base_label`` when diarization is disabled/unavailable or the
-    audio is too short to embed reliably.
+    Falls back to the last assigned label (or ``<base>_00``) when diarization
+    is disabled/unavailable or the audio is too short to embed reliably.
     """
     if not ENABLE_DIARIZATION or VoiceEncoder is None or meeting_id is None:
-        return base_label
+        return f"{base_label}_00"
 
     audio = np.asarray(audio_16k, dtype=np.float32).flatten()
     if audio.size < MIN_SAMPLES:
-        return base_label
+        return _fallback_label(meeting_id, base_label)
 
     try:
         emb = _get_encoder().embed_utterance(audio)
     except Exception as exc:  # pragma: no cover - runtime/audio dependent
         print(f"⚠️ Diarization embed failed: {exc}")
-        return base_label
+        return _fallback_label(meeting_id, base_label)
 
     emb = emb / (np.linalg.norm(emb) + 1e-9)
 
@@ -82,8 +93,10 @@ def assign_speaker(audio_16k, meeting_id: int, base_label: str = "SPEAKER") -> s
             updated = (best["centroid"] * n + emb) / (n + 1)
             best["centroid"] = updated / (np.linalg.norm(updated) + 1e-9)
             best["count"] = n + 1
+            _last_label[meeting_id] = best["label"]
             return best["label"]
 
         label = f"{base_label}_{len(speakers):02d}"
         speakers.append({"label": label, "centroid": emb, "count": 1})
+        _last_label[meeting_id] = label
         return label
