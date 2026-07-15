@@ -53,3 +53,6 @@ htmlcov/
 
 # Jupyter notebooks checkpoints
 .ipynb_checkpoints/
+
+# Runtime debug exports
+backend/debug_exports/
