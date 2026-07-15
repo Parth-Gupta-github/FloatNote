@@ -1,5 +1,5 @@
 from sqlalchemy import select
-from .models import AsyncSessionLocal, Meeting, Transcript, ActionItem, engine, Base
+from .models import AsyncSessionLocal, Meeting, Transcript, ActionItem, SpeakerAlias, engine, Base
 from ai_modules.utils.meeting_content import (
     clean_meeting_text,
     is_useful_audio_text,
@@ -126,12 +126,52 @@ async def get_latest_meeting_data() -> dict | None:
         return None
     return await get_meeting_data(meeting.id)
 
+async def get_speaker_aliases(meeting_id: int) -> dict[str, str]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(SpeakerAlias).where(SpeakerAlias.meeting_id == meeting_id)
+        )
+        return {a.speaker_key: a.display_name for a in result.scalars().all()}
+
+
+async def set_speaker_alias(meeting_id: int, speaker_key: str, display_name: str) -> dict[str, str]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(SpeakerAlias).where(
+                SpeakerAlias.meeting_id == meeting_id,
+                SpeakerAlias.speaker_key == speaker_key,
+            )
+        )
+        alias = result.scalars().first()
+        if alias is None:
+            alias = SpeakerAlias(
+                meeting_id=meeting_id,
+                speaker_key=speaker_key,
+                display_name=display_name,
+            )
+            session.add(alias)
+        else:
+            alias.display_name = display_name
+        await session.commit()
+    return await get_speaker_aliases(meeting_id)
+
+
 async def save_meeting_summary(meeting_id: int, summary: str) -> bool:
     async with AsyncSessionLocal() as session:
         meeting = await session.get(Meeting, meeting_id)
         if meeting is None:
             return False
         meeting.summary = summary
+        await session.commit()
+        return True
+
+
+async def set_meeting_title(meeting_id: int, title: str) -> bool:
+    async with AsyncSessionLocal() as session:
+        meeting = await session.get(Meeting, meeting_id)
+        if meeting is None:
+            return False
+        meeting.title = title
         await session.commit()
         return True
 
@@ -142,11 +182,13 @@ async def save_to_database(data: dict, meeting_id: int | None = None):
                 meeting_id = await get_current_meeting_id(session)
 
             # --- 1. AUDIO TRANSCRIPT SAVE ---
-            speaker_label = "MIC"
+            # `source` distinguishes the local mic ("MIC") from system/loopback
+            # audio of remote participants ("SPEAKER"). Defaults to MIC.
+            speaker_label = data.get("source") or "MIC"
             if data.get("text"):
                 # Speaker nikaalo (Agar PyAnnote ne bheja hai)
                 if data.get("speakers") and len(data["speakers"]) > 0:
-                    speaker_label = data["speakers"][0].get("speaker") or "MIC"
+                    speaker_label = data["speakers"][0].get("speaker") or speaker_label
                 
                 keywords_list = data.get("keywords", [])
                 audio_keywords = ",".join(keywords_list) if isinstance(keywords_list, list) else ""
