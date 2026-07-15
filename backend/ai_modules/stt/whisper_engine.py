@@ -57,7 +57,10 @@ CHUNK_SECONDS = int(os.getenv("CHUNK_SECONDS", "5"))
 CHUNK_SIZE = SAMPLE_RATE * CHUNK_SECONDS
 BUFFER_SECONDS = int(os.getenv("AUDIO_BUFFER_SECONDS", "30"))
 
-SILENCE_RMS_THRESHOLD = 0.015
+# Cheap pre-gate before VAD — only meant to skip dead-silent chunks. Real
+# speech detection is Silero VAD's job, so keep this LOW: laptop mics often
+# speak at 0.003–0.01 RMS and a 0.015 gate silently discards everything.
+SILENCE_RMS_THRESHOLD = float(os.getenv("RMS_GATE", "0.002"))
 MAX_WS_CLIENTS = 3
 OCR_EMPTY_RESULT = {"text": "", "keywords": []}
 
@@ -96,6 +99,8 @@ control_lock: asyncio.Lock = asyncio.Lock()
 # Whisper is CPU-bound; running the MIC and SPEAKER transcriptions at the same
 # time thrashes the cores and makes BOTH pipelines fall behind real time.
 transcribe_lock: asyncio.Lock = asyncio.Lock()
+# Rate-limits the "below gate" log line per source.
+_gate_log_at: dict[str, float] = {}
 
 
 class ChatRequest(BaseModel):
@@ -439,7 +444,15 @@ async def transcription_worker(source: str, target_buffer: deque, with_ocr: bool
         audio_np = np.array(target_buffer, dtype=np.float32)[:CHUNK_SIZE]
 
         # Cheap energy pre-filter: skip dead-silent chunks without running VAD.
-        if float(np.sqrt(np.mean(audio_np**2))) <= SILENCE_RMS_THRESHOLD:
+        rms = float(np.sqrt(np.mean(audio_np**2)))
+        if rms <= SILENCE_RMS_THRESHOLD:
+            now = loop.time()
+            if rms > 0.0005 and now - _gate_log_at.get(source, 0.0) > 5:
+                _gate_log_at[source] = now
+                print(
+                    f"🎚️ {source} level {rms:.4f} below gate "
+                    f"{SILENCE_RMS_THRESHOLD} — raise input volume or lower RMS_GATE"
+                )
             _drain_buffer(target_buffer, CHUNK_SIZE // 4)
             continue
 
