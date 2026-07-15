@@ -1,126 +1,297 @@
-# FloatNote STT Diarization Server
+# FloatNote — Real-time Meeting Assistant (Local)
 
-This project runs a local speech-to-text server that:
+FloatNote captures live microphone audio and screen text (OCR), extracts keywords and action-items, persists meeting data in SQLite, and provides tools for summarization and grounded Q&A over recorded meeting content.
 
-- captures microphone audio
-- captures system/speaker audio through VB-Cable
-- transcribes speech with `faster-whisper`
-- sends transcript messages over WebSocket
-- extracts simple action items with spaCy
+This README documents everything you need to install, configure, and run FloatNote locally on Windows/macOS/Linux and includes examples for development, debugging, and integrating the frontend UI.
 
-The main entry point is [stt_diarization_server2.py](/C:/Users/Tashvi/Coding/FloatNote/Floatnote_git/stt_diarization_server2.py).
+Contents
+- [Project summary](#project-summary)
+- [Features](#features)
+- [Architecture (mermaid)](#architecture-mermaid)
+- [Quickstart — Windows (recommended)](#quickstart-windows-recommended)
+- [Prerequisites](#prerequisites)
+- [Backend: setup & run](#backend-setup--run)
+- [Frontend: setup & run (React + Electron)](#frontend-setup--run-react--electron)
+- [Environment variables](#environment-variables)
+- [WebSocket API (realtime)](#websocket-api-realtime)
+- [Database & data model](#database--data-model)
+- [Common tasks & examples](#common-tasks--examples)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License & acknowledgements](#license--acknowledgements)
 
+## Project summary
 
+FloatNote is built as a local-first meeting assistant with these goals:
+- Low-latency transcription from microphone using Whisper (or its faster variants).
+- Screen capture-based OCR to capture slide content and extract keywords.
+- Automatic extraction and persistence of transcripts, keywords, and action items.
+- Tools to summarize meetings and provide a grounded chatbot powered by vector search (FAISS) + Hugging Face models.
 
-## Requirements
+## Features
 
-- Windows
-- Python 3.10
-- VB-Cable installed
-- a working microphone
+- Real-time streaming WebSocket (`/ws`) that emits JSON analysis packages (transcript, keywords, OCR result, actions).
+- Screen-monitor OCR with change-detection to avoid repeated OCR on static content.
+- Lightweight SQLite storage (async SQLAlchemy) for meetings, transcripts, and action items.
+- Summarizer and Chatbot helpers (Hugging Face + LangChain) configurable via env tokens.
 
-Optional:
+## Architecture (mermaid)
 
-- Hugging Face access token for `pyannote.audio`
-- FFmpeg / TorchCodec compatibility if you want pyannote audio decoding to work fully
+```mermaid
+flowchart LR
+      subgraph Client
+            UI[React UI / Electron]
+      end
 
-## Audio Device Setup
+      subgraph Backend
+            STT[Whisper STT WebSocket /ws]
+            OCR[OCR Processor]
+            DB[(SQLite: meeting_assistant.db)]
+            Chat[Chatbot (LangChain + FAISS)]
+            Summ[Summarizer (Hugging Face)]
+      end
 
-Recommended setup on this machine:
+      Mic[Microphone] --> STT
+      Screen[Screen Capture] --> OCR
+      OCR --> STT
+      STT --> DB
+      STT --> UI
+      DB --> Chat
+      DB --> Summ
+      UI --> Chat
+      UI --> Summ
+```
 
-- Microphone input: `Microphone Array`
-- Windows or app speaker output: `CABLE Input (VB-Audio Virtual Cable)`
-- Server loopback capture: `CABLE Output (VB-Audio Virtual Cable)`
+## Quickstart — Windows (recommended)
 
-Do not use `Stereo Mix` as your main mic if you want your voice separated from system audio.
-
-## Create The Virtual Environment
+1. Clone the repository:
 
 ```powershell
-C:\Users\HP\AppData\Local\Programs\Python\Python310\python.exe -m venv venv
-.\venv\Scripts\activate
-python -m pip install -r requirements.txt
+git clone <repo-url> FloatNote
+cd FloatNote
 ```
 
-## Run The Server
+2. Create a Python virtual environment and activate it:
 
 ```powershell
-.\venv\Scripts\python.exe -u .\stt_diarization_server2.py
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+# On macOS/Linux: python -m venv .venv; source .venv/bin/activate
 ```
 
-The server starts on:
-
-- WebSocket: `ws://127.0.0.1:8000/ws`
-
-The server now also prints transcript lines to the terminal in this format:
-
-```text
-[TRANSCRIPT] speaker=S0 source=mic duration=0.6s text=Hello.
-```
-
-## Watch Live Transcript Output
-
-Open a second PowerShell window and run:
+3. Install backend Python dependencies:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\watch_ws.ps1
+pip install -r backend/requirements.txt
 ```
 
-This connects to `ws://127.0.0.1:8000/ws` and prints JSON messages from the server.
+4. Install system dependencies:
 
-## How To Test
+- Tesseract OCR (for screen OCR) — Windows installer recommended: install and ensure `tesseract.exe` path is correct.
+- ffmpeg (required by Whisper and some audio tooling) — ensure `ffmpeg` is on PATH.
 
-1. Start the server.
-2. Start the watcher script in another terminal.
-3. Speak into your microphone.
-4. Or play a YouTube video while system output is set to `CABLE Input`.
-5. Check the watcher window for transcript messages.
-
-## Optional Device Overrides
-
-If device auto-selection picks the wrong input, set environment variables before starting the server:
+5. Copy example envs and edit tokens:
 
 ```powershell
-$env:FLOATNOTE_MIC_DEVICE="19"
-$env:FLOATNOTE_LOOP_DEVICE="21"
-.\venv\Scripts\python.exe -u .\stt_diarization_server2.py
+copy backend\.env.example backend\.env
+copy frontend\react-app\.env.example frontend\react-app\.env
+# Then edit backend\.env and add your HUGGINGFACEHUB_API_TOKEN
 ```
 
-Use the correct indexes for your machine.
+6. Start the backend (PowerShell helper provided):
 
-## Output Message Shape
+```powershell
+.\backend\start_backend.ps1
+# or: python backend/main.py
+```
 
-The WebSocket server sends JSON payloads like:
+7. Start the frontend (React dev server):
+
+```powershell
+cd frontend/react-app
+npm install
+npm run dev
+```
+
+8. (Optional) Start the Electron wrapper (loads the React dev URL):
+
+```powershell
+cd frontend/electron
+npm install
+npm start
+```
+
+## Prerequisites
+
+- Python 3.10+
+- Node.js 18+ and npm
+- Tesseract OCR (Windows: install and make sure path matches the `ocr_processor.py` setting)
+- ffmpeg (on PATH) for Whisper
+- On Windows, install Visual C++ Build Tools if binary packages fail to install
+
+Note: Some packages (torch, faiss) may have platform-specific wheels. If `pip install -r backend/requirements.txt` fails for these, follow the official install instructions for your platform (CPU vs GPU builds).
+
+## Backend — setup & run
+
+Main entry points:
+- `backend/main.py` — primary entry which either imports and runs `ai_modules.stt.whisper_engine.run_server()` or falls back to a minimal FastAPI root.
+- `backend/ai_modules/stt/whisper_engine.py` — WebSocket server and audio capture pipeline.
+
+Environment-sensitive defaults
+- `HOST` and `PORT` are read by `backend/main.py` (defaults: `0.0.0.0:8000`).
+
+Recommended flow (cross-platform):
+
+- Create and activate venv (see Quickstart).
+- Install requirements: `pip install -r backend/requirements.txt`.
+- Ensure `backend/.env` contains `HUGGINGFACEHUB_API_TOKEN` if you want summarizer/chat features.
+- Start server: `python backend/main.py` (or use `backend/start_backend.ps1` on Windows).
+
+Using dotenv CLI (if installed via requirements):
+
+```bash
+python -m dotenv run -- python backend/main.py
+```
+
+### Backend helper files added
+- [backend/.env.example](backend/.env.example) — example environment variables (copy to `.env`).
+- [backend/start_backend.ps1](backend/start_backend.ps1) — PowerShell helper to load `.env` and run the server.
+
+## Frontend — setup & run (React + Electron)
+
+React app:
+- Folder: `frontend/react-app`
+- Dev server: `npm run dev` (Vite)
+- Example env: [frontend/react-app/.env.example](frontend/react-app/.env.example)
+
+Electron shell:
+- Folder: `frontend/electron`
+- Start: `npm start` (this loads the React dev URL in a desktop window)
+
+Notes
+- The React UI expects a WebSocket at `ws://<HOST>:<PORT>/ws` and REST endpoints for summaries/chat if available.
+
+## Environment variables
+
+Copy `backend/.env.example` to `backend/.env` and add secrets/tokens.
+
+Key variables (explained):
+- `HOST`, `PORT` — server bind address and port.
+- `HUGGINGFACEHUB_API_TOKEN` — required for Hugging Face model access used by summarizer/chat.
+- `HUGGINGFACE_CHAT_MODEL` — repo id for chat model (optional override).
+- `ENABLE_OCR` — enable screen OCR processing (`true`/`false`).
+- `OCR_INTERVAL_SECONDS`, `OCR_CHANGE_THRESHOLD` — OCR tuning for change-detection.
+
+See [backend/.env.example](backend/.env.example).
+
+## WebSocket API (realtime)
+
+The STT server exposes a WebSocket endpoint at:
+
+```
+ws://<HOST>:<PORT>/ws
+```
+
+Behavior:
+- On connection, the server returns a handshake JSON: `{ "type": "connected", "meeting_id": <id> }`.
+- While streaming, the server pushes JSON packets containing at least:
 
 ```json
 {
-  "text": "hello there",
-  "source": "mic",
-  "speaker": "S0",
-  "actions": [],
-  "duration": 0.6,
-  "ts": 1710000000.123
+      "text": "transcribed text",
+      "keywords": ["keyword1","keyword2"],
+      "ocr": { "text": "screen text", "keywords": ["slide","topic"] },
+      "meeting_id": 1,
+      "actions": ["action item 1", "action item 2"]
 }
 ```
 
-## Known Limitations
+Example JavaScript client:
 
-- `pyannote.audio` is currently optional and may fall back to RMS-only source attribution.
-- You may see a `torchcodec` warning in stderr. In the current setup that warning is non-fatal.
-- The Hugging Face token is currently hardcoded in the server file. Moving it to an environment variable would be safer.
-- Device names and indexes can vary across machines and driver setups.
+```javascript
+const ws = new WebSocket('ws://localhost:8000/ws');
+ws.onopen = () => console.log('connected');
+ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      console.log('msg', msg);
+};
+```
+
+Example Python client (websockets):
+
+```python
+import asyncio
+import websockets
+import json
+
+async def run():
+            async with websockets.connect('ws://localhost:8000/ws') as ws:
+                        async for msg in ws:
+                                    data = json.loads(msg)
+                                    print(data)
+
+asyncio.run(run())
+```
+
+## Database & data model
+
+SQLite file: `backend/database/meeting_assistant.db`
+
+Tables (core):
+- `meetings` — id, title, start_time, summary
+- `transcripts` — id, meeting_id, timestamp, text, keywords, source
+- `action_items` — id, meeting_id, description, assignee, status
+
+Quick DB viewer:
+
+```bash
+python backend/database/view_db.py
+```
+
+## Common tasks & examples
+
+- View latest meeting data (from Python):
+
+```python
+from backend.database.crud import get_latest_meeting_data
+import asyncio
+
+print(asyncio.run(get_latest_meeting_data()))
+```
+
+- Generate a vector store for chatbot usage (example flow):
+
+```python
+from backend.ai_modules.chatbot.chatbot import convert_to_documents, create_vector_store, ask_question
+data = asyncio.run(get_latest_meeting_data())
+docs = convert_to_documents(data['items'])
+db = create_vector_store(docs)
+answer = ask_question('What are the action items?', db)
+```
 
 ## Troubleshooting
 
-If the server starts but you see no transcript output:
+- If `ai_modules.stt` fails to import in `backend/main.py`, ensure you installed the heavy dependencies (Whisper, torch, sounddevice). If you want a minimal startup without STT, the fallback FastAPI app will start.
+- OCR empty results: install Tesseract and confirm `pytesseract.pytesseract.tesseract_cmd` in `backend/ai_modules/ocr/ocr_processor.py` points to the installed executable.
+- Resource issues: large models (Whisper, HF chat) need CPU/RAM. Use smaller models or run on a machine with sufficient memory.
 
-- confirm the watcher is connected to `ws://127.0.0.1:8000/ws`
-- confirm your mic is the active input device
-- confirm speaker output is routed to `CABLE Input`
-- confirm VB-Cable recording side appears as `CABLE Output`
-- try forcing device indexes with `FLOATNOTE_MIC_DEVICE` and `FLOATNOTE_LOOP_DEVICE`
+## Contributing
 
-If Python cannot run from the venv:
+- PRs welcome. Keep changes focused and update this README with any new instructions.
 
-- recreate the venv using the real `python.exe`
-- reinstall dependencies from [requirements.txt](/C:/Users/Tashvi/Coding/FloatNote/Floatnote_git/requirements.txt)
+## License & acknowledgements
+
+Add a `LICENSE` file if you intend to open-source this project. FloatNote leverages open-source packages such as Whisper, Hugging Face, LangChain, spaCy, FAISS, Vite, and Electron.
+
+---
+
+Files I added to make the README actionable:
+- [backend/.env.example](backend/.env.example)
+- [backend/start_backend.ps1](backend/start_backend.ps1)
+- [frontend/react-app/.env.example](frontend/react-app/.env.example)
+
+If you'd like, I can also:
+- Wire simple FastAPI REST routes for `/meetings/latest/summary` and `/meetings/latest/chat` and add curl/postman examples.
+- Add a Dockerfile / docker-compose for local containerized development.
+
+Tell me which of the above you'd like next and I will implement it.
