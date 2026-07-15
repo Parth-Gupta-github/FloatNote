@@ -9,9 +9,6 @@ env/
 venv/
 floatnote_env/
 
-# Backend environment file
-backend/.env
-
 # VS Code settings
 .vscode/
 
