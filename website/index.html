@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FloatNote — Your meetings, turned into searchable memory</title>
+  <meta name="description" content="FloatNote is a free, open-source AI meeting assistant that transcribes speech, identifies speakers, reads your screen, and answers questions about any meeting — all locally on your machine." />
+  <meta property="og:title" content="FloatNote — AI Meeting Assistant" />
+  <meta property="og:description" content="Live transcription, speaker diarization, screen OCR, AI summaries and a meeting chatbot. Free, open source, and local-first." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎙️</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #f8f9fd;
+      --bg-soft: #f1f3fa;
+      --card: #ffffff;
+      --card-border: rgba(15, 23, 42, 0.08);
+      --text: #0f172a;
+      --muted: #52607a;
+      --dim: #7b869e;
+      --indigo: #6366f1;
+      --purple: #a855f7;
+      --pink: #ec4899;
+      --emerald: #10b981;
+      --grad: linear-gradient(100deg, #4f46e5, #9333ea 45%, #db2777);
+      --radius: 18px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    ::selection { background: rgba(168, 85, 247, 0.25); }
+
+    /* ---------- background mesh ---------- */
+    .mesh {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      overflow: hidden;
+      background:
+        radial-gradient(45rem 30rem at 15% -5%, rgba(99, 102, 241, 0.13), transparent 60%),
+        radial-gradient(40rem 28rem at 90% 10%, rgba(168, 85, 247, 0.10), transparent 60%),
+        radial-gradient(50rem 34rem at 50% 110%, rgba(236, 72, 153, 0.08), transparent 60%),
+        var(--bg);
+    }
+    .mesh::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image: radial-gradient(rgba(15, 23, 42, 0.06) 1px, transparent 1px);
+      background-size: 34px 34px;
+      mask-image: radial-gradient(60rem 40rem at 50% 0%, black 0%, transparent 75%);
+      -webkit-mask-image: radial-gradient(60rem 40rem at 50% 0%, black 0%, transparent 75%);
+    }
+
+    .wrap { max-width: 1140px; margin: 0 auto; padding: 0 24px; }
+
+    /* ---------- nav ---------- */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 50;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      background: rgba(248, 249, 253, 0.78);
+      border-bottom: 1px solid rgba(15, 23, 42, 0.07);
+    }
+    .nav-inner {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 64px;
+    }
+    .logo {
+      display: flex; align-items: center; gap: 10px;
+      font-weight: 800; font-size: 1.15rem; text-decoration: none; color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .logo .mic { font-size: 1.35rem; }
+    .nav-links { display: flex; gap: 28px; align-items: center; }
+    .nav-links a {
+      color: var(--muted); text-decoration: none; font-size: 0.92rem; font-weight: 500;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--text); }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 20px; border-radius: 12px;
+      font-weight: 600; font-size: 0.95rem; text-decoration: none;
+      transition: transform 0.15s, box-shadow 0.2s, background 0.2s;
+      cursor: pointer; border: none;
+    }
+    .btn-primary {
+      background: linear-gradient(100deg, var(--indigo), var(--purple));
+      color: #fff;
+      box-shadow: 0 4px 24px rgba(124, 92, 250, 0.35);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(124, 92, 250, 0.5); }
+    .btn-ghost {
+      background: #ffffff;
+      color: var(--text);
+      border: 1px solid rgba(15, 23, 42, 0.14);
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+    }
+    .btn-ghost:hover { background: var(--bg-soft); transform: translateY(-2px); }
+    .btn-nav { padding: 8px 16px; font-size: 0.88rem; }
+
+    /* ---------- hero ---------- */
+    header { padding: 150px 0 60px; text-align: center; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: rgba(99, 102, 241, 0.08);
+      border: 1px solid rgba(99, 102, 241, 0.28);
+      color: #4f46e5;
+      font-size: 0.82rem; font-weight: 600;
+      padding: 7px 16px; border-radius: 999px;
+      margin-bottom: 26px;
+    }
+    .pill .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--emerald);
+      animation: blink 1.6s ease-in-out infinite;
+    }
+    @keyframes blink { 50% { opacity: 0.3; } }
+
+    h1 {
+      font-size: clamp(2.6rem, 6.4vw, 4.4rem);
+      font-weight: 900;
+      letter-spacing: -0.035em;
+      line-height: 1.08;
+      margin-bottom: 22px;
+    }
+    h1 .grad {
+      background: var(--grad);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .sub {
+      font-size: clamp(1.02rem, 2vw, 1.22rem);
+      color: var(--muted);
+      max-width: 640px;
+      margin: 0 auto 34px;
+    }
+    .cta-row { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-bottom: 20px; }
+    .btn-lg { padding: 15px 30px; font-size: 1.05rem; border-radius: 14px; }
+    .trust { color: var(--dim); font-size: 0.86rem; }
+    .trust b { color: var(--muted); font-weight: 600; }
+
+    /* ---------- app mockup ---------- */
+    .mock-zone { margin-top: 64px; position: relative; }
+    .mock-glow {
+      position: absolute; inset: -8% -10%;
+      background: radial-gradient(50% 60% at 50% 45%, rgba(139, 92, 246, 0.14), transparent 70%);
+      z-index: 0; pointer-events: none;
+    }
+    .mock {
+      position: relative; z-index: 1;
+      max-width: 920px; margin: 0 auto;
+      background: linear-gradient(180deg, #1a1a2c, #0f0f1e);
+      border: 1px solid rgba(15, 23, 42, 0.25);
+      border-radius: 20px;
+      box-shadow: 0 30px 70px rgba(15, 23, 42, 0.28);
+      overflow: hidden;
+      text-align: left;
+    }
+    .mock-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 13px 18px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .mock-bar .b { width: 12px; height: 12px; border-radius: 50%; }
+    .mock-bar .r { background: #ff5f57; } .mock-bar .y { background: #febc2e; } .mock-bar .g { background: #28c840; }
+    .mock-bar .title { margin-left: 10px; font-size: 0.8rem; color: var(--dim); font-weight: 500; }
+    .mock-bar .live {
+      margin-left: auto; display: flex; align-items: center; gap: 6px;
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
+      color: var(--emerald);
+    }
+    .mock-bar .live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--emerald); animation: blink 1.2s infinite; }
+
+    .mock-body { display: grid; grid-template-columns: 1.6fr 1fr; gap: 0; }
+    .mock-left { padding: 22px; border-right: 1px solid rgba(255, 255, 255, 0.06); }
+    .mock-right { padding: 22px; display: flex; flex-direction: column; gap: 18px; }
+    .mock h4 {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+      color: #8a93ad; margin-bottom: 14px;
+    }
+    .mock-bar .title { color: #8a93ad; }
+
+    .line { display: flex; gap: 10px; margin-bottom: 14px; opacity: 0; animation: lineIn 0.5s ease forwards; }
+    .line:nth-child(2) { animation-delay: 0.4s; }
+    .line:nth-child(3) { animation-delay: 1.5s; }
+    .line:nth-child(4) { animation-delay: 2.6s; }
+    .line:nth-child(5) { animation-delay: 3.7s; }
+    @keyframes lineIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    .chip {
+      flex-shrink: 0;
+      font-size: 0.68rem; font-weight: 700;
+      padding: 3px 9px; border-radius: 7px;
+      height: fit-content; margin-top: 2px;
+      letter-spacing: 0.03em;
+    }
+    .chip.s0 { background: rgba(99, 102, 241, 0.18); color: #a5acfa; }
+    .chip.s1 { background: rgba(236, 72, 153, 0.16); color: #f9a8d4; }
+    .chip.ocr { background: rgba(52, 211, 153, 0.14); color: #6ee7b7; }
+    .line p { font-size: 0.88rem; color: #c9cddd; }
+
+    .panel {
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 13px; padding: 15px;
+    }
+    .kw { display: flex; flex-wrap: wrap; gap: 7px; }
+    .kw span {
+      font-size: 0.74rem; font-weight: 600;
+      background: rgba(129, 140, 248, 0.13); color: #b3b9fc;
+      padding: 4px 11px; border-radius: 8px;
+    }
+    .action {
+      display: flex; gap: 9px; align-items: flex-start;
+      font-size: 0.82rem; color: #d6dae8;
+    }
+    .action + .action { margin-top: 10px; }
+    .action .tick { color: var(--emerald); font-weight: 800; }
+    .action b { color: #fff; font-weight: 600; }
+
+    /* ---------- sections ---------- */
+    section { padding: 96px 0; }
+    .kicker {
+      font-size: 0.78rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+      background: var(--grad);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+      margin-bottom: 14px;
+    }
+    h2 {
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      font-weight: 800; letter-spacing: -0.03em; line-height: 1.15;
+      margin-bottom: 16px;
+    }
+    .lead { color: var(--muted); max-width: 560px; margin-bottom: 52px; font-size: 1.02rem; }
+    .center { text-align: center; }
+    .center .lead { margin-left: auto; margin-right: auto; }
+
+    .grid { display: grid; gap: 18px; }
+    .g3 { grid-template-columns: repeat(3, 1fr); }
+    .g4 { grid-template-columns: repeat(4, 1fr); }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      padding: 26px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+      transition: transform 0.25s, border-color 0.25s, box-shadow 0.25s;
+    }
+    .card:hover {
+      transform: translateY(-5px);
+      border-color: rgba(147, 51, 234, 0.35);
+      box-shadow: 0 14px 34px rgba(15, 23, 42, 0.10);
+    }
+    .card .ico {
+      width: 46px; height: 46px; border-radius: 13px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.35rem; margin-bottom: 18px;
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(236, 72, 153, 0.08));
+      border: 1px solid rgba(99, 102, 241, 0.22);
+    }
+    .card h3 { font-size: 1.06rem; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em; }
+    .card p { font-size: 0.9rem; color: var(--muted); }
+    .card .tag {
+      display: inline-block; margin-top: 14px;
+      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em;
+      color: var(--dim); text-transform: uppercase;
+    }
+
+    /* ---------- how it works ---------- */
+    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; counter-reset: step; }
+    .step {
+      position: relative;
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      padding: 30px 26px 26px;
+    }
+    .step .num {
+      position: absolute; top: -18px; left: 24px;
+      width: 38px; height: 38px; border-radius: 11px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 1rem; color: #fff;
+      background: linear-gradient(135deg, var(--indigo), var(--purple));
+      box-shadow: 0 6px 20px rgba(124, 92, 250, 0.35);
+    }
+    .step h3 { font-size: 1.05rem; font-weight: 700; margin: 10px 0 8px; }
+    .step p { font-size: 0.9rem; color: var(--muted); }
+
+    /* ---------- stats ---------- */
+    .stats {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px;
+      margin-top: 60px;
+    }
+    .stat {
+      text-align: center; padding: 26px 12px;
+      background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius);
+    }
+    .stat .n {
+      font-size: 2rem; font-weight: 900; letter-spacing: -0.03em;
+      background: var(--grad);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .stat .l { font-size: 0.82rem; color: var(--dim); margin-top: 4px; font-weight: 500; }
+
+    /* ---------- tech ---------- */
+    .tech-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+    .tech {
+      display: flex; align-items: center; gap: 12px;
+      background: var(--card); border: 1px solid var(--card-border);
+      border-radius: 14px; padding: 16px 18px;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .tech:hover { border-color: rgba(99, 102, 241, 0.4); box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08); }
+    .tech .t-ico { font-size: 1.3rem; }
+    .tech div b { display: block; font-size: 0.9rem; font-weight: 700; }
+    .tech div span { font-size: 0.76rem; color: var(--dim); }
+
+    /* ---------- faq ---------- */
+    .faq { max-width: 760px; margin: 0 auto; }
+    details {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    summary {
+      padding: 19px 22px;
+      font-weight: 600; font-size: 0.98rem;
+      cursor: pointer; list-style: none;
+      display: flex; justify-content: space-between; align-items: center;
+      transition: color 0.2s;
+    }
+    summary::-webkit-details-marker { display: none; }
+    summary::after {
+      content: "+";
+      font-size: 1.3rem; font-weight: 400; color: var(--dim);
+      transition: transform 0.25s;
+    }
+    details[open] summary::after { transform: rotate(45deg); }
+    details .a { padding: 0 22px 20px; color: var(--muted); font-size: 0.92rem; }
+
+    /* ---------- download ---------- */
+    .dl-card {
+      position: relative;
+      background: linear-gradient(160deg, rgba(99, 102, 241, 0.09), rgba(236, 72, 153, 0.06)), #ffffff;
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      border-radius: 26px;
+      padding: 70px 40px;
+      text-align: center;
+      overflow: hidden;
+      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.08);
+    }
+    .dl-card::before {
+      content: "";
+      position: absolute; inset: 0;
+      background: radial-gradient(38rem 20rem at 50% -30%, rgba(168, 85, 247, 0.12), transparent 70%);
+      pointer-events: none;
+    }
+    .dl-card h2 { position: relative; }
+    .dl-card .lead { position: relative; margin: 0 auto 36px; }
+    .dl-row { position: relative; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+    .os-note { position: relative; margin-top: 22px; color: var(--dim); font-size: 0.84rem; }
+    .os-note a { color: var(--muted); }
+
+    /* ---------- footer ---------- */
+    footer {
+      border-top: 1px solid rgba(15, 23, 42, 0.08);
+      padding: 56px 0 40px;
+      margin-top: 40px;
+    }
+    .foot { display: flex; justify-content: space-between; gap: 40px; flex-wrap: wrap; }
+    .foot .brand p { color: var(--dim); font-size: 0.88rem; margin-top: 10px; max-width: 300px; }
+    .foot-links { display: flex; gap: 64px; flex-wrap: wrap; }
+    .foot-links h5 {
+      font-size: 0.76rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+      color: var(--dim); margin-bottom: 14px;
+    }
+    .foot-links a {
+      display: block; color: var(--muted); text-decoration: none;
+      font-size: 0.9rem; margin-bottom: 10px; transition: color 0.2s;
+    }
+    .foot-links a:hover { color: var(--text); }
+    .copy {
+      margin-top: 44px; padding-top: 24px;
+      border-top: 1px solid rgba(15, 23, 42, 0.07);
+      display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+      color: var(--dim); font-size: 0.84rem;
+    }
+    .copy a { color: var(--muted); text-decoration: none; }
+    .copy a:hover { color: var(--text); }
+
+    /* ---------- reveal ---------- */
+    .reveal { opacity: 0; transform: translateY(28px); transition: opacity 0.7s ease, transform 0.7s ease; }
+    .reveal.in { opacity: 1; transform: none; }
+
+    /* ---------- responsive ---------- */
+    @media (max-width: 900px) {
+      .g3, .g4, .steps, .tech-grid { grid-template-columns: repeat(2, 1fr); }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .mock-body { grid-template-columns: 1fr; }
+      .mock-left { border-right: none; border-bottom: 1px solid rgba(255,255,255,0.06); }
+      .nav-links a:not(.btn) { display: none; }
+    }
+    @media (max-width: 560px) {
+      .g3, .g4, .steps, .tech-grid { grid-template-columns: 1fr; }
+      header { padding-top: 120px; }
+      section { padding: 68px 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="mesh"></div>
+
+  <!-- ===== NAV ===== -->
+  <nav>
+    <div class="wrap nav-inner">
+      <a class="logo" href="#top"><span class="mic">🎙️</span>FloatNote</a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#usecases">Use cases</a>
+        <a href="#tech">Tech</a>
+        <a href="#faq">FAQ</a>
+        <a class="btn btn-primary btn-nav" href="#download">⬇ Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ===== HERO ===== -->
+  <header id="top">
+    <div class="wrap">
+      <div class="pill"><span class="dot"></span>Free &amp; open source · Local-first AI</div>
+      <h1>Your meetings, turned into<br /><span class="grad">searchable memory</span></h1>
+      <p class="sub">
+        FloatNote runs quietly in the background — transcribing every word, identifying who said it,
+        reading your slides, and extracting action items. Then ask it anything about any meeting, ever.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary btn-lg" href="https://github.com/Parth-Gupta-github/FloatNote/releases/latest">⬇ Download for Windows</a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/Parth-Gupta-github/FloatNote">★ Star on GitHub</a>
+      </div>
+      <p class="trust"><b>Windows 10/11</b> · No meeting bots · Your transcripts never leave your machine</p>
+
+      <!-- App mockup -->
+      <div class="mock-zone">
+        <div class="mock-glow"></div>
+        <div class="mock">
+          <div class="mock-bar">
+            <span class="b r"></span><span class="b y"></span><span class="b g"></span>
+            <span class="title">FloatNote — Meeting #49</span>
+            <span class="live"><span class="dot"></span>LIVE</span>
+          </div>
+          <div class="mock-body">
+            <div class="mock-left">
+              <h4>📝 Live Transcript</h4>
+              <div class="line"><span class="chip s0">SPEAKER 00</span><p>Good morning everyone — today we'll walk through the Q3 roadmap and lock the release date.</p></div>
+              <div class="line"><span class="chip s1">SPEAKER 01</span><p>Frontend is nearly done. We still need to fix the responsive bugs before the demo.</p></div>
+              <div class="line"><span class="chip ocr">SCREEN OCR</span><p>"Slide 4 — Release Plan: Testing starts July 25 · Final deadline July 30"</p></div>
+              <div class="line"><span class="chip s0">SPEAKER 00</span><p>Sarah needs to review the API proposal and share feedback by Friday.</p></div>
+              <div class="line"><span class="chip s1">SPEAKER 01</span><p>I'll take the database optimization — queries should be 3× faster after indexing.</p></div>
+            </div>
+            <div class="mock-right">
+              <div class="panel">
+                <h4>🗝️ Keywords</h4>
+                <div class="kw">
+                  <span>Q3 roadmap</span><span>release date</span><span>API proposal</span>
+                  <span>testing</span><span>database</span>
+                </div>
+              </div>
+              <div class="panel">
+                <h4>✅ Action Items</h4>
+                <div class="action"><span class="tick">✓</span><span><b>Sarah</b> → review API proposal by Friday</span></div>
+                <div class="action"><span class="tick">✓</span><span><b>Speaker 01</b> → optimize database queries</span></div>
+                <div class="action"><span class="tick">✓</span><span><b>Team</b> → fix responsive bugs before demo</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- stats -->
+      <div class="stats">
+        <div class="stat reveal"><div class="n">~2.5s</div><div class="l">Transcription latency</div></div>
+        <div class="stat reveal"><div class="n">100%</div><div class="l">Local audio processing</div></div>
+        <div class="stat reveal"><div class="n">0</div><div class="l">Meeting bots required</div></div>
+        <div class="stat reveal"><div class="n">∞</div><div class="l">Meetings remembered</div></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== FEATURES ===== -->
+  <section id="features">
+    <div class="wrap center">
+      <div class="kicker reveal">Everything captured</div>
+      <h2 class="reveal">One assistant. Every detail.</h2>
+      <p class="lead reveal">Seven AI systems working together in real time — so you can be present in the meeting instead of taking notes.</p>
+      <div class="grid g3">
+        <div class="card reveal">
+          <div class="ico">🎤</div>
+          <h3>Live Transcription</h3>
+          <p>Every word streamed through OpenAI Whisper locally — accurate, real-time, and completely offline.</p>
+          <span class="tag">Whisper · Local</span>
+        </div>
+        <div class="card reveal">
+          <div class="ico">🎭</div>
+          <h3>Speaker Diarization</h3>
+          <p>Know exactly who said what. FloatNote separates voices and labels each speaker automatically.</p>
+          <span class="tag">PyAnnote · Offline</span>
+        </div>
+        <div class="card reveal">
+          <div class="ico">🖥️</div>
+          <h3>Screen OCR</h3>
+          <p>Slides change — FloatNote notices. On-screen text is captured and merged into the meeting record.</p>
+          <span class="tag">Tesseract</span>
+        </div>
+        <div class="card reveal">
+          <div class="ico">✅</div>
+          <h3>Action Item Extraction</h3>
+          <p>"Sarah will send the report" becomes a tracked task with an assignee — detected as it's spoken.</p>
+          <span class="tag">spaCy NLP</span>
+        </div>
+        <div class="card reveal">
+          <div class="ico">🧠</div>
+          <h3>AI Summaries</h3>
+          <p>Walk away with a crisp summary of decisions, blockers, and next steps — generated on demand.</p>
+          <span class="tag">BART · LLM</span>
+        </div>
+        <div class="card reveal">
+          <div class="ico">💬</div>
+          <h3>Meeting Chatbot</h3>
+          <p>"What deadline did we agree on last Tuesday?" Ask anything — answers grounded in your actual transcripts.</p>
+          <span class="tag">RAG · FAISS</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== HOW IT WORKS ===== -->
+  <section id="how" style="background: rgba(15,23,42,0.025); border-top: 1px solid rgba(15,23,42,0.06); border-bottom: 1px solid rgba(15,23,42,0.06);">
+    <div class="wrap center">
+      <div class="kicker reveal">How it works</div>
+      <h2 class="reveal">Set it. Forget it. Ask it anything.</h2>
+      <p class="lead reveal">No bots joining your calls. No uploads. FloatNote listens where you listen — on your machine.</p>
+      <div class="steps">
+        <div class="step reveal">
+          <div class="num">1</div>
+          <h3>Start FloatNote</h3>
+          <p>Launch the app before your meeting. It captures your microphone and watches your screen in the background.</p>
+        </div>
+        <div class="step reveal">
+          <div class="num">2</div>
+          <h3>It builds memory</h3>
+          <p>Speech, speakers, slides, and action items are indexed into a local database as the meeting happens.</p>
+        </div>
+        <div class="step reveal">
+          <div class="num">3</div>
+          <h3>Query everything</h3>
+          <p>Get a summary the second the call ends — or ask the chatbot about any meeting from weeks ago.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== USE CASES ===== -->
+  <section id="usecases">
+    <div class="wrap center">
+      <div class="kicker reveal">Who it's for</div>
+      <h2 class="reveal">Built for people who live in meetings</h2>
+      <p class="lead reveal">If information passes through a call, FloatNote makes sure it never gets lost.</p>
+      <div class="grid g4">
+        <div class="card reveal">
+          <div class="ico">🛠️</div>
+          <h3>Product &amp; Engineering</h3>
+          <p>Standups, sprint planning, retros — decisions and owners captured without breaking flow.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ico">📞</div>
+          <h3>Sales &amp; Client Calls</h3>
+          <p>Focus on the customer, not your notepad. Every commitment is recorded and searchable.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ico">🔬</div>
+          <h3>Research &amp; Interviews</h3>
+          <p>Interviews transcribed with speaker labels — quote sources accurately, every time.</p>
+        </div>
+        <div class="card reveal">
+          <div class="ico">🎓</div>
+          <h3>Students &amp; Lectures</h3>
+          <p>Lectures become searchable notes with slide text included. Revise by asking questions.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== TECH ===== -->
+  <section id="tech" style="background: rgba(15,23,42,0.025); border-top: 1px solid rgba(15,23,42,0.06); border-bottom: 1px solid rgba(15,23,42,0.06);">
+    <div class="wrap center">
+      <div class="kicker reveal">Under the hood</div>
+      <h2 class="reveal">Serious engineering, open to everyone</h2>
+      <p class="lead reveal">A modern local-first AI stack — every line of it open source.</p>
+      <div class="tech-grid">
+        <div class="tech reveal"><span class="t-ico">⚡</span><div><b>FastAPI</b><span>Async WebSocket backend</span></div></div>
+        <div class="tech reveal"><span class="t-ico">🗣️</span><div><b>OpenAI Whisper</b><span>Local speech-to-text</span></div></div>
+        <div class="tech reveal"><span class="t-ico">🎭</span><div><b>PyAnnote</b><span>Speaker diarization</span></div></div>
+        <div class="tech reveal"><span class="t-ico">👁️</span><div><b>Tesseract OCR</b><span>Screen reading</span></div></div>
+        <div class="tech reveal"><span class="t-ico">🦙</span><div><b>Groq · Llama 3.3</b><span>Keyword intelligence</span></div></div>
+        <div class="tech reveal"><span class="t-ico">🔗</span><div><b>LangChain + FAISS</b><span>RAG meeting chatbot</span></div></div>
+        <div class="tech reveal"><span class="t-ico">📚</span><div><b>spaCy</b><span>Action item NLP</span></div></div>
+        <div class="tech reveal"><span class="t-ico">⚛️</span><div><b>React 19 + Electron</b><span>Desktop experience</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FAQ ===== -->
+  <section id="faq">
+    <div class="wrap center">
+      <div class="kicker reveal">FAQ</div>
+      <h2 class="reveal">Questions, answered</h2>
+      <p class="lead reveal">Everything people usually ask before installing.</p>
+      <div class="faq">
+        <details class="reveal">
+          <summary>Does my audio get uploaded to the cloud?</summary>
+          <div class="a">No. Transcription (Whisper) and speaker diarization (PyAnnote) run entirely on your machine. Only optional features — AI summaries and the chatbot LLM — call external APIs, and those only send text, never audio.</div>
+        </details>
+        <details class="reveal">
+          <summary>Does it join my meetings as a bot?</summary>
+          <div class="a">Never. FloatNote listens through your microphone and reads your screen locally. It works with Zoom, Meet, Teams, or any app — because it doesn't need to integrate with any of them.</div>
+        </details>
+        <details class="reveal">
+          <summary>What can the meeting chatbot answer?</summary>
+          <div class="a">Anything grounded in your meeting history: "What were the action items from Monday?", "What deadline did the client mention?", "Summarize what Speaker 01 said about the budget." Answers come from a local vector index of your transcripts.</div>
+        </details>
+        <details class="reveal">
+          <summary>Which platforms are supported?</summary>
+          <div class="a">Windows 10/11 today. The stack is cross-platform (Python + Electron), and macOS/Linux builds are on the roadmap. You can also run it from source on any OS right now.</div>
+        </details>
+        <details class="reveal">
+          <summary>Is it really free?</summary>
+          <div class="a">Yes — FloatNote is fully open source. Download the app or clone the repository and run it from source. Optional cloud AI features use free-tier API keys you control.</div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== DOWNLOAD ===== -->
+  <section id="download">
+    <div class="wrap">
+      <div class="dl-card reveal">
+        <h2>Stop taking notes.<br />Start remembering everything.</h2>
+        <p class="lead">Free forever. Open source. Running locally in under five minutes.</p>
+        <div class="dl-row">
+          <a class="btn btn-primary btn-lg" href="https://github.com/Parth-Gupta-github/FloatNote/releases/latest">⬇ Download for Windows</a>
+          <a class="btn btn-ghost btn-lg" href="https://github.com/Parth-Gupta-github/FloatNote">View source on GitHub</a>
+        </div>
+        <p class="os-note">macOS &amp; Linux coming soon — or <a href="https://github.com/Parth-Gupta-github/FloatNote#-setup--installation">run from source</a> today.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FOOTER ===== -->
+  <footer>
+    <div class="wrap">
+      <div class="foot">
+        <div class="brand">
+          <a class="logo" href="#top"><span class="mic">🎙️</span>FloatNote</a>
+          <p>Real-time meeting intelligence that stays on your machine. Transcribe, identify, extract, remember.</p>
+        </div>
+        <div class="foot-links">
+          <div>
+            <h5>Product</h5>
+            <a href="#features">Features</a>
+            <a href="#how">How it works</a>
+            <a href="#usecases">Use cases</a>
+            <a href="#download">Download</a>
+          </div>
+          <div>
+            <h5>Resources</h5>
+            <a href="https://github.com/Parth-Gupta-github/FloatNote">GitHub</a>
+            <a href="https://github.com/Parth-Gupta-github/FloatNote#readme">Documentation</a>
+            <a href="https://github.com/Parth-Gupta-github/FloatNote/issues">Report an issue</a>
+          </div>
+        </div>
+      </div>
+      <div class="copy">
+        <span>© 2026 FloatNote. Open source, local-first.</span>
+        <span>Built with ❤️ by <a href="https://github.com/Parth-Gupta-github">FloatNote Team</a></span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // scroll reveal
+    const io = new IntersectionObserver(
+      (entries) => entries.forEach((e) => e.isIntersecting && e.target.classList.add("in")),
+      { threshold: 0.12 }
+    );
+    document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+
+    // restart transcript animation loop
+    const left = document.querySelector(".mock-left");
+    setInterval(() => {
+      left.querySelectorAll(".line").forEach((l) => {
+        l.style.animation = "none";
+        void l.offsetWidth;
+        l.style.animation = "";
+      });
+    }, 14000);
+  </script>
+</body>
+</html>
