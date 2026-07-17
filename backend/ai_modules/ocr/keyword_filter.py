@@ -1,28 +1,8 @@
 import json
-import os
 import re
 from typing import List
 
-from dotenv import load_dotenv
-
-# Optional providers: missing packages must not crash the server —
-# filtering falls back to Groq, then to local dedup.
-try:
-    from google import genai
-except ImportError:
-    genai = None
-
-try:
-    from groq import Groq
-except ImportError:
-    Groq = None
-
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if (genai and GEMINI_API_KEY) else None
-groq_client = Groq(api_key=GROQ_API_KEY) if (Groq and GROQ_API_KEY) else None
+from ai_modules.utils.llm_client import chat_completion
 
 STOPWORDS = {
     "the",
@@ -131,58 +111,24 @@ def parse_response(content: str, fallback: List[str]) -> List[str]:
             return fallback
 
 
-def gemini_filter(input_text: str, fallback: List[str]) -> List[str] | None:
-    if not gemini_client:
-        return None
-
-    try:
-        response = gemini_client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=build_prompt(input_text),
-            config={"temperature": 0},
-        )
-        print("GEMINI RESPONSE")
-        return parse_response(response.text.strip(), fallback)
-    except Exception as e:
-        print("Gemini failed:", e)
-        return None
-
-
-def groq_filter(input_text: str, fallback: List[str]) -> List[str] | None:
-    if not groq_client:
-        return None
-
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "Return only JSON."},
-                {"role": "user", "content": build_prompt(input_text)},
-            ],
-            temperature=0,
-        )
-
-        content = response.choices[0].message.content.strip()
-        print("GROQ RESPONSE")
-        return parse_response(content, fallback)
-    except Exception as e:
-        print("Groq failed:", e)
-        return None
-
-
 def filter_keywords(keywords: List[str]) -> List[str]:
     if not keywords:
         return []
 
     fallback = _local_filter(keywords)
-    input_text = "\n".join(fallback)
+    if not fallback:
+        return []
 
-    result = gemini_filter(input_text, fallback)
-    if result is not None:
-        return _local_filter(result)
-
-    result = groq_filter(input_text, fallback)
-    if result is not None:
-        return _local_filter(result)
-
-    return fallback
+    try:
+        content = chat_completion(
+            [
+                {"role": "system", "content": "Return only JSON."},
+                {"role": "user", "content": build_prompt("\n".join(fallback))},
+            ],
+            temperature=0,
+            max_tokens=300,
+        )
+        return _local_filter(parse_response(content, fallback))
+    except Exception as exc:
+        print(f"LLM keyword filter unavailable, using local filter: {exc}")
+        return fallback

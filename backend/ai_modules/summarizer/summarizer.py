@@ -1,26 +1,14 @@
-import os
 from collections import Counter
-from pathlib import Path
 
-import requests
-from dotenv import load_dotenv
-
+from ai_modules.utils.llm_client import LLM_MODEL, chat_completion
 from ai_modules.utils.meeting_content import (
     clean_meeting_text,
     is_useful_audio_text,
     is_useful_ocr_text,
 )
 
-BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-load_dotenv(BACKEND_ENV_PATH)
-
 SUMMARY_CONTEXT_CHAR_LIMIT = 9000
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_SUMMARY_MODEL = os.getenv(
-    "GROQ_SUMMARY_MODEL",
-    "llama-3.3-70b-versatile",
-)
 
 def _normalize_action(action):
     if isinstance(action, dict):
@@ -106,55 +94,6 @@ def _fallback_summary(lines, keywords, actions):
     return "\n\n".join(parts)
 
 
-def _call_groq(messages, model, temperature=0.2, max_completion_tokens=700):
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not set in backend/.env")
-
-    response = requests.post(
-        GROQ_API_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_completion_tokens": max_completion_tokens,
-        },
-        timeout=60,
-    )
-    if not response.ok:
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = {}
-
-        error_info = payload.get("error", {}) if isinstance(payload, dict) else {}
-        error_code = str(error_info.get("code", "")).strip()
-        error_message = str(error_info.get("message", "")).strip()
-
-        if error_code == "expired_api_key":
-            raise ValueError(
-                "Groq API key has expired. Update GROQ_API_KEY in backend/.env."
-            )
-        if response.status_code == 401:
-            raise ValueError(
-                error_message or "Groq rejected the API key. Check GROQ_API_KEY in backend/.env."
-            )
-
-        response.raise_for_status()
-
-    payload = response.json()
-    return (
-        payload.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
-
-
 def summarize_meeting_result(all_data):
     if not all_data:
         summary = "Summary\nNo meeting data was provided.\n\nAction Items\n- No action items found"
@@ -162,8 +101,7 @@ def summarize_meeting_result(all_data):
             "summary": summary,
             "source": "empty",
             "model": None,
-            "used_groq": False,
-            "used_huggingface": False,
+            "used_llm": False,
             "error": None,
         }
 
@@ -174,12 +112,11 @@ def summarize_meeting_result(all_data):
             "summary": summary,
             "source": "empty",
             "model": None,
-            "used_groq": False,
-            "used_huggingface": False,
+            "used_llm": False,
             "error": None,
         }
 
-    model = DEFAULT_GROQ_SUMMARY_MODEL
+    model = LLM_MODEL
     context = _build_summary_context(lines)
     action_seed = "\n".join(f"- {action}" for action in actions[:10]) or "- No action items found"
     keyword_seed = ", ".join(keywords[:8]) or "None"
@@ -214,26 +151,24 @@ def summarize_meeting_result(all_data):
     ]
 
     try:
-        summary_text = _call_groq(messages, model=model)
+        summary_text = chat_completion(messages, temperature=0.2, max_tokens=700)
         if not summary_text:
-            raise ValueError("Groq returned an empty summary.")
+            raise ValueError("The LLM returned an empty summary.")
         return {
             "summary": summary_text,
-            "source": "groq",
+            "source": "llm",
             "model": model,
-            "used_groq": True,
-            "used_huggingface": False,
+            "used_llm": True,
             "error": None,
         }
     except Exception as exc:
-        print(f"Groq summarizer failed: {exc}")
+        print(f"LLM summarizer failed: {exc}")
         fallback_summary = _fallback_summary(lines, keywords, actions)
         return {
             "summary": fallback_summary,
             "source": "fallback",
             "model": model,
-            "used_groq": False,
-            "used_huggingface": False,
+            "used_llm": False,
             "error": str(exc),
         }
 

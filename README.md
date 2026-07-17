@@ -16,7 +16,7 @@ FloatNote is a desktop-first meeting assistant that quietly runs in the backgrou
 | ✏️ **Speaker Aliases & Titles** | Rename speakers to real names and edit the meeting title mid-recording, live-synced to all connected clients |
 | ⏯️ **Meeting Controls** | Start, pause, resume, stop, and mute (mic/speaker independently) from the dashboard |
 | 🖥️ **Screen OCR** | Captures slide content as it changes, extracting text and keywords automatically (opt-in) |
-| 🧠 **AI Summarization** | Generates meeting summaries via BART/Pegasus on HuggingFace Inference API (or local fallback) |
+| 🧠 **AI Summarization** | Generates meeting summaries via the project's single LLM (Qwen2.5-7B), with a local fallback |
 | 💬 **Meeting Chatbot** | Ask questions about any past meeting — answers grounded in a FAISS vector store via RAG |
 | 🗃️ **Persistent Storage** | All transcripts, speaker labels, OCR captures, and action items saved to SQLite via async SQLAlchemy |
 | ⚡ **Action Item Extraction** | NLP pipeline (spaCy) detects tasks and assignees from spoken text |
@@ -40,12 +40,13 @@ FloatNote/
 │   │   │   └── diarizer.py            # Streaming speaker diarization (Resemblyzer)
 │   │   ├── ocr/
 │   │   │   ├── ocr_processor.py       # Screen capture + Tesseract OCR
-│   │   │   └── keyword_filter.py      # LLM keyword filtering (Gemini → Groq → local)
+│   │   │   └── keyword_filter.py      # LLM keyword filtering (local fallback)
 │   │   ├── summarizer/
-│   │   │   └── summarizer.py          # HuggingFace summarization (BART/Pegasus)
+│   │   │   └── summarizer.py          # LLM meeting summaries (local fallback)
 │   │   ├── chatbot/
-│   │   │   └── chatbot.py             # LangChain RAG chatbot (FAISS + Qwen LLM)
+│   │   │   └── chatbot.py             # RAG chatbot (FAISS retrieval + LLM)
 │   │   └── utils/
+│   │       ├── llm_client.py          # THE single LLM client (Qwen2.5-7B via HF)
 │   │       └── nlp_processor.py       # spaCy NLP pipeline
 │   └── database/
 │       ├── models.py                  # SQLAlchemy models (Meeting, Transcript, ActionItem)
@@ -107,17 +108,12 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 Create a `.env` file inside `backend/`:
 
 ```env
-# Required for AI summarization and chatbot
+# Required — powers the chatbot, summaries, and keyword filtering (one model for everything)
 HUGGINGFACEHUB_API_TOKEN=hf_...
-
-# Optional — LLM keyword filtering (Gemini preferred, Groq fallback)
-GEMINI_API_KEY=...
-GROQ_API_KEY=gsk_...
+HUGGINGFACE_PROVIDER=auto
 ```
 
-> 💡 A HuggingFace API token is **required** for summarization and the chatbot. Get one free at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
-
-> 💡 Gemini/Groq keys are **optional**. With neither key, keyword filtering falls back to local deduplication.
+> 💡 All LLM features run on a **single model** (`Qwen/Qwen2.5-7B-Instruct`) through the HuggingFace router. Create a token with the "Make calls to Inference Providers" permission at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens). Without a token, summaries, chat, and keyword filtering degrade to local fallbacks.
 
 ### 5. Run everything (recommended)
 
@@ -204,21 +200,16 @@ npm start
 
 ## 🤖 AI Models
 
+FloatNote uses exactly **one LLM** for every language task — chatbot answers, meeting summaries, and keyword filtering all go through `ai_modules/utils/llm_client.py`. The remaining models are small local pipeline models (audio/NLP), not LLM providers.
+
 | Component | Default Model | Configurable |
 |---|---|---|
+| **The LLM** (chat + summaries + keywords) | `Qwen/Qwen2.5-7B-Instruct` (HuggingFace router) | `HUGGINGFACE_CHAT_MODEL` env var |
 | Transcription | `openai/whisper-base` (local) | Change model size in `whisper_engine.py` |
 | Voice Activity Detection | Silero VAD (local) | `VAD_THRESHOLD` env var |
 | Speaker Diarization | Resemblyzer d-vector encoder (local) | `DIARIZATION_SIMILARITY` env var |
-| Summarization | `facebook/bart-large-cnn` (HF API) | `HF_SUMMARIZER_REPO_ID` env var |
-| Chatbot LLM | `Qwen/Qwen2.5-7B-Instruct` (HF API) | `HUGGINGFACE_CHAT_MODEL` env var |
-| Keyword Filtering | `gemini-3-flash-preview` (Gemini API), falls back to `llama-3.3-70b-versatile` (Groq), then local dedup | API keys optional |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local) | Hardcoded in `chatbot.py` |
 | NLP / Action Items | `en_core_web_sm` (spaCy, local) | — |
-
-**Supported summarizer models:**
-- `facebook/bart-large-cnn`
-- `google/pegasus-xsum`
-- `sshleifer/distilbart-cnn-12-6`
 
 ---
 
@@ -251,11 +242,9 @@ python backend/database/view_db.py
 
 | Variable | Default | Description |
 |---|---|---|
-| `HUGGINGFACEHUB_API_TOKEN` | — | **Required.** HF API token for summaries + chat |
-| `GEMINI_API_KEY` | — | Optional. Gemini keyword filtering |
-| `GROQ_API_KEY` | — | Optional. Groq keyword-filtering fallback |
-| `HUGGINGFACE_CHAT_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | Chat LLM repo ID |
-| `HF_SUMMARIZER_REPO_ID` | `facebook/bart-large-cnn` | Summarizer model repo ID |
+| `HUGGINGFACEHUB_API_TOKEN` | — | **Required.** HF token for the single LLM (chat + summaries + keywords) |
+| `HUGGINGFACE_CHAT_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | The one LLM used everywhere |
+| `HUGGINGFACE_PROVIDER` | `auto` | Inference provider routing (`auto` recommended) |
 | `ENABLE_SPEAKER` | `true` | Capture system (loopback) audio |
 | `ENABLE_DIARIZATION` | `true` | Label speakers on the system-audio stream |
 | `DIARIZATION_SIMILARITY` | `0.70` | Cosine similarity to match an existing speaker |
@@ -281,9 +270,8 @@ python backend/database/view_db.py
 - [Resemblyzer](https://github.com/resemble-ai/Resemblyzer) — speaker embeddings for streaming diarization
 - [soundcard](https://github.com/bastibe/SoundCard) — WASAPI loopback (system audio) capture
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) + [pytesseract](https://github.com/madmaze/pytesseract) — screen reading
-- [Gemini API](https://ai.google.dev/) / [Groq API](https://console.groq.com/) — LLM-powered keyword filtering
 - [LangChain](https://www.langchain.com/) + [FAISS](https://faiss.ai/) — RAG chatbot
-- [HuggingFace Inference API](https://huggingface.co/inference-api) — summarization + chat LLM
+- [HuggingFace router](https://huggingface.co/docs/inference-providers) (`Qwen2.5-7B-Instruct`) — the single LLM behind chat, summaries, and keyword filtering
 - [spaCy](https://spacy.io/) — action item extraction + NLP
 - [SQLAlchemy (async)](https://docs.sqlalchemy.org/) + [SQLite](https://sqlite.org/) — database
 

@@ -2,13 +2,13 @@ import os
 import re
 from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from ai_modules.utils.llm_client import LLM_MODEL, chat_completion
 from ai_modules.utils.meeting_content import (
     clean_meeting_text,
     is_useful_audio_text,
@@ -57,12 +57,6 @@ QUESTION_STOPWORDS = {
     "who",
     "why",
 }
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_CHAT_MODEL = os.getenv(
-    "GROQ_CHAT_MODEL",
-    "llama-3.3-70b-versatile",
-)
-
 def _safe_str(value):
     if value is None:
         return ""
@@ -203,51 +197,6 @@ def create_vector_store(docs):
         return _SimpleVectorStore(chunks)
 
 
-def _call_groq(messages, model, temperature=0.1, max_completion_tokens=500):
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not set in backend/.env")
-
-    response = requests.post(
-        GROQ_API_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_completion_tokens": max_completion_tokens,
-        },
-        timeout=60,
-    )
-    if not response.ok:
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = {}
-
-        error_info = payload.get("error", {}) if isinstance(payload, dict) else {}
-        error_code = _safe_str(error_info.get("code"))
-        error_message = _safe_str(error_info.get("message"))
-
-        if error_code == "expired_api_key":
-            raise ValueError("Groq API key has expired. Update GROQ_API_KEY in backend/.env.")
-        if response.status_code == 401:
-            raise ValueError(error_message or "Groq rejected the API key. Check GROQ_API_KEY in backend/.env.")
-
-        response.raise_for_status()
-
-    payload = response.json()
-    return (
-        payload.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
-
-
 def _extract_evidence_lines(docs, query, limit=6):
     query_tokens = set(_significant_tokens(query) or _tokenize(query))
     scored = []
@@ -311,7 +260,7 @@ def _fallback_answer(query, docs):
     del query
     if not docs:
         return "I could not find anything relevant in the current meeting data."
-    return "I could not answer from Groq right now. Please try again in a moment."
+    return "The AI model could not be reached right now. Please try again in a moment."
 
 
 def ask_question_debug(query, vector_db):
@@ -323,7 +272,7 @@ def ask_question_debug(query, vector_db):
             "model": None,
             "context": "",
             "retrieved_documents": [],
-            "used_groq": False,
+            "used_llm": False,
             "error": None,
         }
 
@@ -336,7 +285,7 @@ def ask_question_debug(query, vector_db):
             "model": None,
             "context": "",
             "retrieved_documents": [],
-            "used_groq": False,
+            "used_llm": False,
             "error": None,
         }
 
@@ -348,11 +297,11 @@ def ask_question_debug(query, vector_db):
             "model": None,
             "context": "",
             "retrieved_documents": [doc.page_content for doc in docs],
-            "used_groq": False,
+            "used_llm": False,
             "error": None,
         }
 
-    model = DEFAULT_GROQ_CHAT_MODEL
+    model = LLM_MODEL
     messages = [
         {
             "role": "system",
@@ -377,25 +326,25 @@ def ask_question_debug(query, vector_db):
     ]
 
     try:
-        answer = _call_groq(messages, model=model)
+        answer = chat_completion(messages, temperature=0.1, max_tokens=500)
         return {
             "question": clean_query,
             "answer": answer or "I could not find that in the current meeting data.",
             "model": model,
             "context": context,
             "retrieved_documents": [doc.page_content for doc in docs],
-            "used_groq": True,
+            "used_llm": True,
             "error": None,
         }
     except Exception as exc:
-        print(f"Groq chatbot failed: {exc}")
+        print(f"LLM chatbot failed: {exc}")
         return {
             "question": clean_query,
             "answer": _fallback_answer(clean_query, docs),
             "model": model,
             "context": context,
             "retrieved_documents": [doc.page_content for doc in docs],
-            "used_groq": False,
+            "used_llm": False,
             "error": str(exc),
         }
 

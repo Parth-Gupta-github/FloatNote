@@ -732,8 +732,7 @@ async def get_latest_meeting_summary():
         "summary": summary_result["summary"],
         "summary_source": summary_result["source"],
         "summary_model": summary_result["model"],
-        "used_groq": summary_result["used_groq"],
-        "used_huggingface": summary_result["used_huggingface"],
+        "used_llm": summary_result["used_llm"],
         "summary_error": summary_result["error"],
     }
 
@@ -750,8 +749,7 @@ async def get_meeting_summary(meeting_id: int):
         "summary": summary_result["summary"],
         "summary_source": summary_result["source"],
         "summary_model": summary_result["model"],
-        "used_groq": summary_result["used_groq"],
-        "used_huggingface": summary_result["used_huggingface"],
+        "used_llm": summary_result["used_llm"],
         "summary_error": summary_result["error"],
     }
 
