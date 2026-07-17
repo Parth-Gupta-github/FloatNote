@@ -1,8 +1,8 @@
 # FloatNote 🎙️
 
-> **Real-time meeting intelligence** — transcription, screen reading, AI summaries, and a chatbot that knows your meeting.
+> **Real-time meeting intelligence** — transcription, speaker diarization, screen reading, AI summaries, and a chatbot that knows your meeting.
 
-FloatNote is a desktop-first meeting assistant that quietly runs in the background while you work. It captures your microphone, reads your screen during presentations, and turns everything into searchable, queryable meeting memory — powered by local Whisper transcription and HuggingFace LLMs.
+FloatNote is a desktop-first meeting assistant that quietly runs in the background while you work. It captures your microphone **and** your system audio (remote participants), tells speakers apart in real time, reads your screen during presentations, and turns everything into searchable, queryable meeting memory — powered by local Whisper transcription and HuggingFace LLMs.
 
 ---
 
@@ -10,11 +10,15 @@ FloatNote is a desktop-first meeting assistant that quietly runs in the backgrou
 
 | Feature | Description |
 |---|---|
-| 🎤 **Live Transcription** | Streams audio from your mic through OpenAI Whisper (`base` model) in real-time |
-| 🖥️ **Screen OCR** | Captures slide content as it changes, extracting text and keywords automatically |
+| 🎤 **Live Transcription** | Streams mic audio through OpenAI Whisper (`base` model) in real time, gated by Silero VAD so only real speech is transcribed |
+| 🔊 **System Audio Capture** | Captures remote participants via WASAPI loopback (`soundcard`) — hear both sides of the meeting, with per-meeting consent |
+| 🗣️ **Speaker Diarization** | Streaming, fully-offline speaker identification (Resemblyzer d-vectors) — consistent `SPEAKER_00 / SPEAKER_01` labels across a live meeting |
+| ✏️ **Speaker Aliases & Titles** | Rename speakers to real names and edit the meeting title mid-recording, live-synced to all connected clients |
+| ⏯️ **Meeting Controls** | Start, pause, resume, stop, and mute (mic/speaker independently) from the dashboard |
+| 🖥️ **Screen OCR** | Captures slide content as it changes, extracting text and keywords automatically (opt-in) |
 | 🧠 **AI Summarization** | Generates meeting summaries via BART/Pegasus on HuggingFace Inference API (or local fallback) |
 | 💬 **Meeting Chatbot** | Ask questions about any past meeting — answers grounded in a FAISS vector store via RAG |
-| 🗃️ **Persistent Storage** | All transcripts, OCR captures, and action items saved to SQLite via async SQLAlchemy |
+| 🗃️ **Persistent Storage** | All transcripts, speaker labels, OCR captures, and action items saved to SQLite via async SQLAlchemy |
 | ⚡ **Action Item Extraction** | NLP pipeline (spaCy) detects tasks and assignees from spoken text |
 | 🖥️ **Electron Desktop App** | Optional Electron wrapper for a native windowed experience |
 
@@ -24,15 +28,19 @@ FloatNote is a desktop-first meeting assistant that quietly runs in the backgrou
 
 ```
 FloatNote/
+├── run.ps1                            # Dev runner: launches backend + React + Electron
 ├── backend/
-│   ├── main.py                        # FastAPI app + WebSocket server
+│   ├── main.py                        # Entry point (starts the server below)
 │   ├── requirements.txt
 │   ├── ai_modules/
 │   │   ├── stt/
-│   │   │   └── whisper_engine.py      # Audio capture + Whisper transcription
+│   │   │   └── whisper_engine.py      # FastAPI app + WebSocket server, mic & loopback
+│   │   │                              #   capture, Silero VAD, Whisper transcription
+│   │   ├── diarization/
+│   │   │   └── diarizer.py            # Streaming speaker diarization (Resemblyzer)
 │   │   ├── ocr/
 │   │   │   ├── ocr_processor.py       # Screen capture + Tesseract OCR
-│   │   │   └── keyword_filter.py      # Keyword post-processing
+│   │   │   └── keyword_filter.py      # LLM keyword filtering (Gemini → Groq → local)
 │   │   ├── summarizer/
 │   │   │   └── summarizer.py          # HuggingFace summarization (BART/Pegasus)
 │   │   ├── chatbot/
@@ -43,11 +51,14 @@ FloatNote/
 │       ├── models.py                  # SQLAlchemy models (Meeting, Transcript, ActionItem)
 │       ├── crud.py                    # Async database operations
 │       └── view_db.py                 # Database viewer utility
-└── frontend/
-    ├── react-app/                     # Vite + React 19 + Tailwind CSS UI
-    │   └── src/App.jsx                # Main dashboard (WebSocket client)
-    └── electron/
-        └── main.js                    # Electron wrapper (loads localhost:5173)
+├── frontend/
+│   ├── react-app/                     # Vite + React 19 + Tailwind CSS UI
+│   │   └── src/App.jsx                # Dashboard: live transcript, speaker labels,
+│   │                                  #   meeting controls, summaries, chat
+│   └── electron/
+│       └── main.js                    # Electron wrapper (loads localhost:5173)
+└── website/
+    └── index.html                     # Landing page
 ```
 
 ---
@@ -58,7 +69,8 @@ FloatNote/
 
 - Python 3.10+
 - Node.js 18+
-- [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) (for screen reading)
+- Windows (for system-audio loopback capture; mic-only works elsewhere)
+- [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) (only if you enable screen reading)
 
 ### 1. Clone the repo
 
@@ -75,12 +87,12 @@ python -m venv .venv
 pip install -r backend/requirements.txt
 ```
 
-> ⚠️ First run downloads the Whisper `base` model (~150MB) and the spaCy `en_core_web_sm` model automatically.
+> ⚠️ First run downloads the Whisper `base` model (~150MB), the Silero VAD model, the Resemblyzer voice encoder, and the spaCy `en_core_web_sm` model automatically.
 
-### 3. Install Tesseract OCR
-**Windows:**
+### 3. (Optional) Install Tesseract OCR
 
-Download the installer from the [Tesseract at UB Mannheim wiki](https://github.com/UB-Mannheim/tesseract/wiki), then install via winget:
+Only needed if you set `ENABLE_OCR=true`. On Windows:
+
 ```bash
 winget install UB-Mannheim.TesseractOCR
 ```
@@ -98,36 +110,36 @@ Create a `.env` file inside `backend/`:
 # Required for AI summarization and chatbot
 HUGGINGFACEHUB_API_TOKEN=hf_...
 
-# Required for keyword filtering (Groq LLM)
+# Optional — LLM keyword filtering (Gemini preferred, Groq fallback)
+GEMINI_API_KEY=...
 GROQ_API_KEY=gsk_...
 ```
 
 > 💡 A HuggingFace API token is **required** for summarization and the chatbot. Get one free at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
 
-> 💡 A Groq API key is **required** for LLM-powered keyword filtering. Without it, keywords fall back to simple deduplication.
+> 💡 Gemini/Groq keys are **optional**. With neither key, keyword filtering falls back to local deduplication.
 
-### 5. Start the backend
+### 5. Run everything (recommended)
 
-```bash
-.\.venv\Scripts\Activate.ps1
-python backend/main.py
+```powershell
+.\run.ps1               # backend + React + Electron, each in its own window
+.\run.ps1 -NoElectron   # backend + React only (open http://localhost:5173)
 ```
 
-The server starts at `http://localhost:8000` and immediately begins listening to your microphone.
-
-### 6. Start the frontend
+### Or start each part manually
 
 ```bash
+# Backend — http://localhost:8000
+.\.venv\Scripts\Activate.ps1
+cd backend
+python main.py
+
+# Frontend — http://localhost:5173
 cd frontend/react-app
 npm install
 npm run dev
-```
 
-Open `http://localhost:5173` in your browser.
-
-### 7. (Optional) Run as Electron desktop app
-
-```bash
+# (Optional) Electron desktop app
 cd frontend/electron
 npm install
 npm start
@@ -139,11 +151,20 @@ npm start
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `WS` | `/ws` | Real-time audio + OCR stream (connects and starts a meeting) |
+| `WS` | `/ws` | Real-time transcript / status / OCR stream |
+| `POST` | `/meetings/start` | Start a new meeting (recording begins) |
+| `POST` | `/meetings/pause` | Pause recording |
+| `POST` | `/meetings/resume` | Resume recording |
+| `POST` | `/meetings/stop` | Stop and finalize the meeting |
+| `POST` | `/meetings/mute` | Mute/unmute mic and/or system audio |
+| `POST` | `/meetings/title` | Set or edit the active meeting's title |
+| `GET` | `/meetings/{id}/speakers` | List speaker aliases for a meeting |
+| `POST` | `/meetings/{id}/speakers` | Rename a speaker (`speaker_key` → `display_name`) |
 | `GET` | `/meetings/latest/summary` | Summarize the most recent meeting |
 | `GET` | `/meetings/{id}/summary` | Summarize a specific meeting by ID |
 | `POST` | `/meetings/latest/chat` | Ask a question about the latest meeting |
 | `POST` | `/meetings/{id}/chat` | Ask a question about a specific meeting |
+| `GET` | `/meetings/{id}/debug/export` | Export raw meeting data for debugging |
 
 ### Chat request body
 
@@ -153,21 +174,28 @@ npm start
 }
 ```
 
-### WebSocket message format (incoming)
+### WebSocket status message
 
 ```json
 {
-  "type": "connected",
-  "meeting_id": 42
+  "type": "status",
+  "recording": true,
+  "paused": false,
+  "meeting_id": 42,
+  "title": "Q3 Roadmap Sync",
+  "mic_muted": false,
+  "speaker_muted": false,
+  "speaker_enabled": true
 }
 ```
+
+### WebSocket transcript message
 
 ```json
 {
   "text": "Let's align on the Q3 roadmap.",
   "keywords": ["roadmap", "Q3"],
-  "actions": [{ "task": "Share roadmap draft", "assignee": "MIC" }],
-  "ocr": { "text": "Slide: Roadmap Overview", "keywords": ["roadmap"] },
+  "actions": [{ "task": "Share roadmap draft", "assignee": "SPEAKER_00" }],
   "meeting_id": 42
 }
 ```
@@ -179,9 +207,11 @@ npm start
 | Component | Default Model | Configurable |
 |---|---|---|
 | Transcription | `openai/whisper-base` (local) | Change model size in `whisper_engine.py` |
+| Voice Activity Detection | Silero VAD (local) | `VAD_THRESHOLD` env var |
+| Speaker Diarization | Resemblyzer d-vector encoder (local) | `DIARIZATION_SIMILARITY` env var |
 | Summarization | `facebook/bart-large-cnn` (HF API) | `HF_SUMMARIZER_REPO_ID` env var |
 | Chatbot LLM | `Qwen/Qwen2.5-7B-Instruct` (HF API) | `HUGGINGFACE_CHAT_MODEL` env var |
-| Keyword Filtering | `llama-3.3-70b-versatile` (Groq API) | Hardcoded in `keyword_filter.py` |
+| Keyword Filtering | `gemini-3-flash-preview` (Gemini API), falls back to `llama-3.3-70b-versatile` (Groq), then local dedup | API keys optional |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local) | Hardcoded in `chatbot.py` |
 | NLP / Action Items | `en_core_web_sm` (spaCy, local) | — |
 
@@ -201,11 +231,14 @@ meetings
   id, title, start_time, summary
 
 transcripts
-  id, meeting_id → meetings.id, timestamp, text, keywords, source (MIC / OCR / SPEAKER_xx)
+  id, meeting_id → meetings.id, timestamp, text, keywords,
+  source (MIC / SPEAKER_xx / OCR)
 
 action_items
   id, meeting_id → meetings.id, description, assignee, status
 ```
+
+Speaker aliases (`SPEAKER_00` → "Priya") are stored per meeting and applied live across the dashboard.
 
 To inspect the database directly:
 ```bash
@@ -218,12 +251,21 @@ python backend/database/view_db.py
 
 | Variable | Default | Description |
 |---|---|---|
-| `HUGGINGFACEHUB_API_TOKEN` | — | **Required.** HF API token |
-| `GROQ_API_KEY` | — | **Required.** Groq API token for keyword filtering |
+| `HUGGINGFACEHUB_API_TOKEN` | — | **Required.** HF API token for summaries + chat |
+| `GEMINI_API_KEY` | — | Optional. Gemini keyword filtering |
+| `GROQ_API_KEY` | — | Optional. Groq keyword-filtering fallback |
 | `HUGGINGFACE_CHAT_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | Chat LLM repo ID |
 | `HF_SUMMARIZER_REPO_ID` | `facebook/bart-large-cnn` | Summarizer model repo ID |
-| `ENABLE_OCR` | `true` | Enable/disable screen capture |
-| `OCR_INTERVAL_SECONDS` | `3.0` | How often to poll for screen changes |
+| `ENABLE_SPEAKER` | `true` | Capture system (loopback) audio |
+| `ENABLE_DIARIZATION` | `true` | Label speakers on the system-audio stream |
+| `DIARIZATION_SIMILARITY` | `0.70` | Cosine similarity to match an existing speaker |
+| `DIARIZATION_MIN_SAMPLES` | `16000` | Min samples (~1s) needed to embed an utterance |
+| `VAD_THRESHOLD` | `0.5` | Silero VAD speech-probability threshold |
+| `RMS_GATE` | `0.002` | Energy pre-gate; skips dead-silent chunks before VAD |
+| `CHUNK_SECONDS` | `5` | Audio chunk length fed to Whisper |
+| `AUDIO_BUFFER_SECONDS` | `30` | Rolling capture buffer size |
+| `ENABLE_OCR` | `false` | Enable screen capture + OCR |
+| `OCR_INTERVAL_SECONDS` | `1.0` | How often to poll for screen changes |
 | `OCR_CHANGE_THRESHOLD` | `0.02` | Minimum pixel-change ratio to trigger OCR |
 | `HOST` | `0.0.0.0` | Backend bind host |
 | `PORT` | `8000` | Backend bind port |
@@ -235,8 +277,11 @@ python backend/database/view_db.py
 **Backend**
 - [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) — async web server + WebSockets
 - [OpenAI Whisper](https://github.com/openai/whisper) — local speech-to-text
+- [Silero VAD](https://github.com/snakers4/silero-vad) — local neural voice activity detection
+- [Resemblyzer](https://github.com/resemble-ai/Resemblyzer) — speaker embeddings for streaming diarization
+- [soundcard](https://github.com/bastibe/SoundCard) — WASAPI loopback (system audio) capture
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) + [pytesseract](https://github.com/madmaze/pytesseract) — screen reading
-- [Groq API](https://console.groq.com/) (`llama-3.3-70b-versatile`) — LLM-powered keyword filtering
+- [Gemini API](https://ai.google.dev/) / [Groq API](https://console.groq.com/) — LLM-powered keyword filtering
 - [LangChain](https://www.langchain.com/) + [FAISS](https://faiss.ai/) — RAG chatbot
 - [HuggingFace Inference API](https://huggingface.co/inference-api) — summarization + chat LLM
 - [spaCy](https://spacy.io/) — action item extraction + NLP
@@ -251,7 +296,20 @@ python backend/database/view_db.py
 
 ## 🐛 Known Issues & Limitations
 
+- **System-audio capture is Windows-only** — loopback recording uses WASAPI via `soundcard`. On other platforms FloatNote runs mic-only.
 - **Windows-only OCR path** — the Tesseract path in `ocr_processor.py` defaults to a Windows path. Linux/macOS users must update it or ensure `tesseract` is on `PATH`.
 - **Single monitor** — OCR captures monitor index `1` by default. Adjust `monitor_index` in `OCRProcessor` for multi-monitor setups.
-- **Max 3 WebSocket clients** — concurrent client connections are capped to prevent resource exhaustion.
+- **Diarization needs ~1s of speech** — very short utterances keep the previous speaker's label (sticky fallback) rather than guessing.
 - **HF API latency** — summarization and chat responses depend on HuggingFace Inference API availability and may be slow on free tier.
+
+---
+
+## 👥 Team
+
+Built as a group project by:
+
+- **Parth Gupta**
+- **Parv Tiwari**
+- **Vansh Agrawal**
+- **Tashvi Gangrade**
+- **Shaurya**
