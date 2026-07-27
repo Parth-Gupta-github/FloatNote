@@ -1,16 +1,52 @@
 {
   "name": "floatnote-desktop",
   "version": "1.0.0",
-  "description": "",
+  "description": "FloatNote — real-time meeting intelligence",
+  "author": "FloatNote Team",
   "main": "main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder"
   },
   "keywords": [],
-  "author": "",
   "license": "ISC",
   "devDependencies": {
-    "electron": "^40.4.1"
+    "electron": "^40.4.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.floatnote.desktop",
+    "productName": "FloatNote",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "splash.html",
+      "backend-error.html"
+    ],
+    "extraResources": [
+      {
+        "from": "../react-app/dist",
+        "to": "ui"
+      },
+      {
+        "from": "../../backend/dist/floatnote-backend",
+        "to": "backend/floatnote-backend"
+      },
+      {
+        "from": "C:/Program Files/Tesseract-OCR",
+        "to": "tesseract"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }
