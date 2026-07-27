@@ -35,6 +35,7 @@ from database.crud import (
     get_meeting_data,
     get_speaker_aliases,
     init_db,
+    list_meetings,
     save_meeting_summary,
     save_to_database,
     set_meeting_title,
@@ -733,6 +734,22 @@ async def rename_speaker(meeting_id: int, request: SpeakerAliasRequest):
         }
     )
     return {"meeting_id": meeting_id, "aliases": aliases}
+
+
+@app.get("/meetings")
+async def list_all_meetings():
+    """Newest-first list of saved meetings, for the history view."""
+    return {"meetings": await list_meetings()}
+
+
+@app.get("/meetings/{meeting_id}/full")
+async def get_full_meeting(meeting_id: int):
+    """Full stored content of a past meeting (transcript, keywords, summary)."""
+    await wait_for_pending_meeting_writes()
+    data = await get_meeting_data(meeting_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return data
 
 
 @app.get("/meetings/latest/summary")

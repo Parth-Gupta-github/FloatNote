@@ -126,6 +126,24 @@ async def get_latest_meeting_data() -> dict | None:
         return None
     return await get_meeting_data(meeting.id)
 
+
+async def list_meetings() -> list[dict]:
+    """Newest-first list of every saved meeting, for the history view."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Meeting).order_by(Meeting.start_time.desc(), Meeting.id.desc())
+        )
+        meetings = result.scalars().all()
+        return [
+            {
+                "id": m.id,
+                "title": m.title or "Untitled meeting",
+                "start_time": m.start_time.isoformat() if m.start_time else None,
+                "has_summary": bool(m.summary),
+            }
+            for m in meetings
+        ]
+
 async def get_speaker_aliases(meeting_id: int) -> dict[str, str]:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
