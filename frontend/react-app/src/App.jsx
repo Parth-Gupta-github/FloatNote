@@ -224,13 +224,11 @@ function App() {
   async function handleStart() {
     setControlBusy(true);
     try {
-      // Fresh meeting → clear the dashboard.
-      setTranscript([]);
-      setKeywords([]);
-      setActions([]);
-      setOcr({ text: "", keywords: [], _everReceived: false });
-      setSummary("");
+      // Fresh meeting → wipe ALL previous-meeting state so nothing carries over
+      // (transcript, keywords, actions, OCR, summary, chat history + errors).
+      clearAll();
       setSpeakerNames({});
+      setMeetingId(null);
       const data = await postControl("/meetings/start", {
         title: titleInput,
         capture_speaker: true,
