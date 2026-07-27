@@ -38,6 +38,9 @@ ehthumbs.db
 dist/
 build/
 
+# Electron / electron-builder release output (huge - shipped via GitHub Releases)
+release/
+
 # Spacy / NLP models (optional, can be huge)
 # en_core_web_sm/
 # *.tar.gz

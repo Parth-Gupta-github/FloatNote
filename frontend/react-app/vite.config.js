@@ -3,8 +3,10 @@ import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
 export default defineConfig({
-  // Relative asset paths so the built index.html works when Electron loads it
-  // as a file:// URL in production (absolute "/assets/..." would 404 there).
+  // Emit relative asset paths ("./assets/...") so the built index.html works
+  // when Electron loads it from disk via file:// in the packaged app.
+  // Without this, Vite uses absolute "/assets/..." paths that resolve to the
+  // filesystem root under file:// and leave the window blank white.
   base: './',
   plugins: [react()],
   server: {

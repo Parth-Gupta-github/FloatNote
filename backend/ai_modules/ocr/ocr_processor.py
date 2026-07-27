@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
@@ -10,14 +13,24 @@ import mss
 import numpy as np
 import spacy
 
-import os
 import pytesseract
 
-# Tesseract engine location. In the packaged app Electron sets TESSERACT_CMD to
-# the bundled copy; in dev it falls back to the standard install path.
-pytesseract.pytesseract.tesseract_cmd = os.getenv(
-    "TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
+
+def _resolve_tesseract_cmd() -> str:
+    override = os.getenv("FLOATNOTE_TESSERACT_CMD")
+    if override and Path(override).is_file():
+        return override
+
+    # Packaged app: portable Tesseract bundled next to the backend executable.
+    bundled = Path(sys.executable).resolve().parent / "tesseract" / "tesseract.exe"
+    if bundled.is_file():
+        return str(bundled)
+
+    # Dev machine fallback: a system-wide install.
+    return r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+
+pytesseract.pytesseract.tesseract_cmd = _resolve_tesseract_cmd()
 
 from .keyword_filter import filter_keywords
 

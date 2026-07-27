@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import threading
 from collections import deque
 from contextlib import asynccontextmanager
@@ -11,6 +12,12 @@ import numpy as np
 import sounddevice as sd
 import torch
 import whisper
+
+
+def _whisper_download_root() -> str | None:
+    """Bundled model dir next to the packaged exe, so first run needs no internet."""
+    bundled = Path(sys.executable).resolve().parent / "whisper_assets"
+    return str(bundled) if bundled.is_dir() else None
 
 try:
     import soundcard as sc
@@ -179,8 +186,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(audio_collector(queue, buffer))
     asyncio.create_task(audio_collector(speaker_queue, speaker_buffer))
     asyncio.create_task(database_worker_loop())
-    asyncio.create_task(transcription_worker(SOURCE_MIC, buffer, with_ocr=True))
-    asyncio.create_task(transcription_worker(SOURCE_SPEAKER, speaker_buffer, with_ocr=False))
+    asyncio.create_task(transcription_worker(SOURCE_MIC, buffer))
+    asyncio.create_task(transcription_worker(SOURCE_SPEAKER, speaker_buffer))
+    asyncio.create_task(ocr_worker())
     print("🟡 Idle — waiting for Start. No audio is being captured.")
 
     yield
@@ -200,7 +208,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-model = whisper.load_model("base")
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+model = whisper.load_model("base", download_root=_whisper_download_root())
 # Silero VAD: local neural speech detector. Replaces the crude RMS gate so only
 # real speech reaches Whisper (kills silence/noise hallucinations, saves CPU).
 vad_model = load_silero_vad()
@@ -364,12 +379,67 @@ def _detect_speech(audio_np: np.ndarray):
     return audio_np[start:end]
 
 
-async def transcription_worker(source: str, target_buffer: deque, with_ocr: bool):
+async def ocr_worker():
+    """Capture + OCR the screen on its own clock while a meeting is recording.
+
+    Deliberately decoupled from speech: screen content must be captured even
+    when nobody is talking (e.g. silently reading a shared slide). Previously
+    OCR only ran piggybacked on *mic* transcriptions, so a meeting with only
+    speaker/loopback audio — or no speech at all — never OCR'd anything.
+
+    Emits the dedicated ``{"type": "ocr"}`` payload the UI listens for, and
+    persists a result only when the on-screen text actually changes.
+    """
+    print("🖥️  OCR worker started")
+    last_saved: str | None = None
+    announced_meeting: int | None = None
+    while True:
+        if not recording or paused or active_meeting_id is None or ocr_processor is None:
+            await asyncio.sleep(0.25)
+            continue
+        chunk_meeting_id = active_meeting_id
+
+        if announced_meeting != chunk_meeting_id:
+            # First tick of a new meeting: tell the UI OCR is alive so the
+            # badge reads IDLE (not DISABLED) even before any text is seen.
+            announced_meeting = chunk_meeting_id
+            last_saved = None
+            await broadcast(
+                {"type": "ocr", "ocr": OCR_EMPTY_RESULT, "meeting_id": chunk_meeting_id}
+            )
+
+        try:
+            result = await ocr_processor.process_async()
+        except Exception as exc:
+            print(f"⚠️ OCR error: {exc}")
+            await asyncio.sleep(max(1.0, ocr_processor.check_interval))
+            continue
+
+        text = (result.get("text") or "").strip()
+        if (
+            text
+            and text != last_saved
+            and recording
+            and not paused
+            and active_meeting_id == chunk_meeting_id
+        ):
+            last_saved = text
+            try:
+                await db_queue.put({"meeting_id": chunk_meeting_id, "data": {"ocr": result}})
+            except asyncio.QueueFull:
+                print("⚠️ [DB Queue Full] Dropping OCR packet!")
+            await broadcast({"type": "ocr", "ocr": result, "meeting_id": chunk_meeting_id})
+
+        await asyncio.sleep(max(0.5, ocr_processor.check_interval / 2))
+
+
+async def transcription_worker(source: str, target_buffer: deque):
     """Continuously transcribe one audio source, persist, and broadcast.
 
     Idle unless a meeting is recording (not paused) and this source isn't muted.
     Speech is gated by VAD; for the speaker stream each utterance is diarized to
     a stable ``SPEAKER_0X`` label so the UI/DB can tell participants apart.
+    OCR runs in its own independent worker (see ``ocr_worker``), not here.
     """
     print(f"🧠 Transcription worker started for {source}")
     is_mic = source == SOURCE_MIC
@@ -433,12 +503,9 @@ async def transcription_worker(source: str, target_buffer: deque, with_ocr: bool
             )
 
         analysis = process_text(text)
-        ocr_result = (
-            await ocr_processor.process_async()
-            if with_ocr and ocr_processor is not None
-            else OCR_EMPTY_RESULT
-        )
-        analysis["ocr"] = ocr_result
+        # OCR is handled by the dedicated ocr_worker; keep the field for
+        # payload-shape compatibility (UI and DB both skip empty OCR).
+        analysis["ocr"] = OCR_EMPTY_RESULT
         analysis["source"] = emit_source
         analysis["meeting_id"] = chunk_meeting_id
 

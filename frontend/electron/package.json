@@ -1,61 +1,51 @@
 {
-  "name": "floatnote-desktop",
+  "name": "electron",
   "version": "1.0.0",
-  "description": "FloatNote — real-time meeting intelligence",
-  "author": "FloatNote Team",
+  "description": "",
   "main": "main.js",
   "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
     "start": "electron .",
-    "dist": "electron-builder"
+    "dist": "electron-builder --win",
+    "dist:publish": "electron-builder --win --publish always"
   },
   "keywords": [],
+  "author": "",
   "license": "ISC",
   "devDependencies": {
     "electron": "^40.4.1",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.8.1"
   },
   "build": {
-    "appId": "com.floatnote.desktop",
+    "appId": "com.floatnote.app",
     "productName": "FloatNote",
-    "asar": false,
-    "directories": {
-      "output": "release"
-    },
     "files": [
       "main.js",
-      "preload.js",
-      "splash.html",
-      "backend-error.html"
+      "config-store.js",
+      "backend-process.js",
+      "first-run/**/*",
+      "package.json"
     ],
     "extraResources": [
-      {
-        "from": "../react-app/dist",
-        "to": "ui"
-      },
-      {
-        "from": "../../backend/dist/floatnote-backend",
-        "to": "backend/floatnote-backend"
-      },
-      {
-        "from": "C:/Program Files/Tesseract-OCR",
-        "to": "tesseract"
-      }
+      { "from": "../react-app/dist", "to": "react-app/dist" },
+      { "from": "../../backend/dist/FloatNoteBackend", "to": "backend" }
     ],
+    "directories": {
+      "output": "../../release"
+    },
     "win": {
-      "target": "nsis",
-      "icon": "build/icon.ico"
+      "target": "nsis"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
     },
     "publish": {
       "provider": "github",
-      "owner": "Parth-Gupta-github",
-      "repo": "FloatNote"
+      "owner": "ParvTiwari",
+      "repo": "FloatNote",
+      "releaseType": "draft"
     }
-  },
-  "dependencies": {
-    "electron-updater": "^6.8.9"
   }
 }
