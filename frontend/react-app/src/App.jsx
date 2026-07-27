@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import SettingsModal from "./SettingsModal";
+import HistoryPanel from "./HistoryPanel";
+import { exportMeeting } from "./exportMeeting";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const WS_BASE_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws";
@@ -30,6 +33,17 @@ function App() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState("");
   const [chatHistory, setChatHistory] = useState([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  const currentMeetingData = () => ({
+    title: activeTitle || titleInput || "FloatNote Meeting",
+    transcript,
+    keywords,
+    actions,
+    summary,
+    speakerNames,
+  });
   const wsRef = useRef(null);
   const transcriptRef = useRef(null);
   const chatRef = useRef(null);
@@ -529,6 +543,34 @@ function App() {
                 Live transcript, OCR capture, meeting summary, and grounded
                 chatbot answers from the same saved meeting stream.
               </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={() => setHistoryOpen(true)}
+                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+                >
+                  🕘 History
+                </button>
+                <button
+                  onClick={() => setSettingsOpen(true)}
+                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+                >
+                  ⚙️ Settings
+                </button>
+                <button
+                  onClick={() => exportMeeting("md", currentMeetingData())}
+                  disabled={transcript.length === 0}
+                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  ⬇️ Export .md
+                </button>
+                <button
+                  onClick={() => exportMeeting("txt", currentMeetingData())}
+                  disabled={transcript.length === 0}
+                  className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  ⬇️ .txt
+                </button>
+              </div>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
@@ -958,6 +1000,13 @@ function App() {
           </div>
         </div>
       </div>
+
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <HistoryPanel
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        apiBase={API_BASE_URL}
+      />
     </div>
   );
 }
