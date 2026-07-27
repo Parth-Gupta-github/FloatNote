@@ -4,6 +4,7 @@ const os = require("os");
 const http = require("http");
 const { spawn } = require("child_process");
 const { app, BrowserWindow, ipcMain } = require("electron");
+const { autoUpdater } = require("electron-updater");
 
 // Crash/step log to a stable file — Windows GUI apps have no console to read.
 const LOG_FILE = path.join(os.tmpdir(), "floatnote-main.log");
@@ -51,9 +52,9 @@ function startBackend() {
       // Avoid the Windows console UnicodeEncodeError on the backend's emoji logs.
       PYTHONIOENCODING: "utf-8",
       PYTHONUTF8: "1",
-      // Screen Reader (OCR) on by default in the shipped app, using the bundled
-      // Tesseract engine so the user needs no separate install.
-      ENABLE_OCR: "true",
+      // Screen Reader (OCR) on by default, toggleable from Settings (applies on
+      // restart). Uses the bundled Tesseract engine — no separate install.
+      ENABLE_OCR: readConfig().ocr_enabled === false ? "false" : "true",
       TESSERACT_CMD: path.join(process.resourcesPath, "tesseract", "tesseract.exe"),
       TESSDATA_PREFIX: path.join(process.resourcesPath, "tesseract", "tessdata"),
     },
@@ -71,6 +72,33 @@ function stopBackend() {
   if (backendProcess && !backendProcess.killed) {
     backendProcess.kill();
     backendProcess = null;
+  }
+}
+
+// Auto-update: on launch, check the latest GitHub release. If a newer version
+// exists, download it in the background and show a native notice; it installs
+// on the next quit. No-op in dev.
+function initAutoUpdater() {
+  if (isDev) {
+    return;
+  }
+  autoUpdater.autoDownload = true;
+  autoUpdater.on("checking-for-update", () => logMain("updater: checking"));
+  autoUpdater.on("update-available", (info) =>
+    logMain("updater: update available " + (info && info.version))
+  );
+  autoUpdater.on("update-not-available", () => logMain("updater: up to date"));
+  autoUpdater.on("download-progress", (p) =>
+    logMain("updater: downloading " + Math.round(p.percent) + "%")
+  );
+  autoUpdater.on("update-downloaded", (info) =>
+    logMain("updater: downloaded " + (info && info.version) + " (installs on quit)")
+  );
+  autoUpdater.on("error", (err) => logMain("updater error: " + err));
+  try {
+    autoUpdater.checkForUpdatesAndNotify();
+  } catch (e) {
+    logMain("updater check threw: " + e);
   }
 }
 
@@ -126,18 +154,32 @@ function readConfig() {
   }
 }
 
+function writeConfig(cfg) {
+  fs.mkdirSync(app.getPath("userData"), { recursive: true });
+  fs.writeFileSync(configFilePath(), JSON.stringify(cfg, null, 2), "utf-8");
+}
+
 ipcMain.handle("floatnote:get-config", () => {
   const cfg = readConfig();
   // Never send the raw token to the renderer — just whether one is set.
-  return { hasToken: Boolean(cfg.huggingface_token) };
+  return {
+    hasToken: Boolean(cfg.huggingface_token),
+    ocrEnabled: cfg.ocr_enabled !== false, // default on
+  };
 });
 
 ipcMain.handle("floatnote:save-token", (_event, token) => {
   const cfg = readConfig();
   cfg.huggingface_token = String(token || "").trim();
-  fs.mkdirSync(app.getPath("userData"), { recursive: true });
-  fs.writeFileSync(configFilePath(), JSON.stringify(cfg, null, 2), "utf-8");
+  writeConfig(cfg);
   return { hasToken: Boolean(cfg.huggingface_token) };
+});
+
+ipcMain.handle("floatnote:set-ocr", (_event, enabled) => {
+  const cfg = readConfig();
+  cfg.ocr_enabled = Boolean(enabled);
+  writeConfig(cfg);
+  return { ocrEnabled: cfg.ocr_enabled };
 });
 
 function createWindow() {
@@ -191,6 +233,11 @@ app.whenReady().then(() => {
     logMain("createWindow returned");
   } catch (e) {
     logMain("createWindow threw: " + (e && e.stack ? e.stack : e));
+  }
+  try {
+    initAutoUpdater();
+  } catch (e) {
+    logMain("initAutoUpdater threw: " + (e && e.stack ? e.stack : e));
   }
 }).catch((e) => logMain("whenReady rejected: " + (e && e.stack ? e.stack : e)));
 

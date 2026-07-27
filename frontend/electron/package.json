@@ -42,11 +42,20 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Parth-Gupta-github",
+      "repo": "FloatNote"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }
