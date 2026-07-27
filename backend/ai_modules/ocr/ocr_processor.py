@@ -10,8 +10,14 @@ import mss
 import numpy as np
 import spacy
 
+import os
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# Tesseract engine location. In the packaged app Electron sets TESSERACT_CMD to
+# the bundled copy; in dev it falls back to the standard install path.
+pytesseract.pytesseract.tesseract_cmd = os.getenv(
+    "TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
 
 from .keyword_filter import filter_keywords
 

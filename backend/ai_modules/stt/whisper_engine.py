@@ -45,7 +45,9 @@ from ai_modules.utils.nlp_processor import process_text
 from ai_modules.ocr.ocr_processor import OCRProcessor
 from ai_modules.diarization.diarizer import assign_speaker, reset_meeting
 
-os.environ.setdefault("ENABLE_OCR", "true")
+# Screen OCR is opt-in: it reads the whole screen, so users must enable it
+# explicitly (privacy). Set ENABLE_OCR=true in the environment to turn it on.
+os.environ.setdefault("ENABLE_OCR", "false")
 os.environ.setdefault("OCR_INTERVAL_SECONDS", "3.0")
 os.environ.setdefault("OCR_CHANGE_THRESHOLD", "0.02")
 
@@ -210,10 +212,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Only the app's own front-end may call this local API. The dev server runs at
+# localhost:5173; the packaged Electron app loads over file:// (Origin "null").
+# A random website the user visits is NOT in this list, so it cannot drive the
+# API even though the server is on the same machine.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,null",
+    ).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -784,8 +799,16 @@ async def chat_with_meeting(meeting_id: int, request: ChatRequest):
     }
 
 
+def _require_debug_enabled():
+    """Debug endpoints dump full transcripts to disk, so they are off unless
+    ENABLE_DEBUG_ENDPOINTS=true. When off we 404 to hide that they exist."""
+    if os.getenv("ENABLE_DEBUG_ENDPOINTS", "false").strip().lower() != "true":
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
 @app.get("/meetings/latest/debug/export")
 async def export_latest_meeting_debug():
+    _require_debug_enabled()
     await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload()
     debug_payload = _build_meeting_debug_payload(meeting_payload)
@@ -804,6 +827,7 @@ async def export_latest_meeting_debug():
 
 @app.get("/meetings/{meeting_id}/debug/export")
 async def export_meeting_debug(meeting_id: int):
+    _require_debug_enabled()
     await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload(meeting_id)
     debug_payload = _build_meeting_debug_payload(meeting_payload)
@@ -822,6 +846,7 @@ async def export_meeting_debug(meeting_id: int):
 
 @app.post("/meetings/latest/chat/debug")
 async def chat_with_latest_meeting_debug(request: ChatRequest):
+    _require_debug_enabled()
     await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload()
     docs = convert_to_documents(meeting_payload["items"])
@@ -849,6 +874,7 @@ async def chat_with_latest_meeting_debug(request: ChatRequest):
 
 @app.post("/meetings/{meeting_id}/chat/debug")
 async def chat_with_meeting_debug(meeting_id: int, request: ChatRequest):
+    _require_debug_enabled()
     await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload(meeting_id)
     docs = convert_to_documents(meeting_payload["items"])
@@ -883,7 +909,7 @@ async def ping_client(ws: WebSocket):
             break
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8000):
+def run_server(host: str = "127.0.0.1", port: int = 8000):
     import uvicorn
 
     uvicorn.run(app, host=host, port=port)

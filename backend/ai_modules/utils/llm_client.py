@@ -11,6 +11,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+from ai_modules.utils.app_config import get_hf_token
+
 BACKEND_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(BACKEND_ENV_PATH)
 
@@ -32,9 +34,12 @@ def chat_completion(messages, temperature=0.2, max_tokens=500) -> str:
     Raises ValueError with an actionable message when the token is missing or
     rejected so callers can fall back locally and surface the real problem.
     """
-    token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    token = get_hf_token()
     if not token:
-        raise ValueError("HUGGINGFACEHUB_API_TOKEN is not set in backend/.env")
+        raise ValueError(
+            "No HuggingFace token configured. Set it in the app's settings "
+            "screen, or set HUGGINGFACEHUB_API_TOKEN in backend/.env for dev."
+        )
 
     response = requests.post(
         HF_ROUTER_URL,

@@ -3,9 +3,17 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
 from datetime import datetime
 import os
+import sys
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE_PATH = os.path.join(BASE_DIR, "meeting_assistant.db")
+# In the packaged desktop app the code lives in a read-only bundle, so the DB
+# must go in the writable per-user data directory (same place as config.json and
+# downloaded models). In dev, keep it next to the code as before.
+if getattr(sys, "frozen", False) or os.getenv("FLOATNOTE_DATA_DIR"):
+    from ai_modules.utils.app_config import data_dir
+    DB_FILE_PATH = os.path.join(str(data_dir()), "meeting_assistant.db")
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DB_FILE_PATH = os.path.join(BASE_DIR, "meeting_assistant.db")
 DATABASE_URL = f"sqlite+aiosqlite:///{DB_FILE_PATH}"
 
 engine = create_async_engine(DATABASE_URL, echo=False)
