@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import sys
 import threading
 from collections import deque
 from contextlib import asynccontextmanager
@@ -13,14 +12,13 @@ import sounddevice as sd
 import torch
 import whisper
 
-
-def _whisper_download_root() -> str | None:
-    """Bundled model dir next to the packaged exe, so first run needs no internet."""
-    bundled = Path(sys.executable).resolve().parent / "whisper_assets"
-    return str(bundled) if bundled.is_dir() else None
-
 try:
     import soundcard as sc
+    import warnings as _warnings
+    from soundcard.mediafoundation import SoundcardRuntimeWarning
+    # Loopback capture flags a "discontinuity" after every silent stretch
+    # (nothing was playing, so nothing was recorded). Harmless — don't spam.
+    _warnings.filterwarnings("ignore", category=SoundcardRuntimeWarning)
 except Exception:  # pragma: no cover - optional/loopback may be unavailable
     sc = None
 
@@ -37,6 +35,7 @@ from database.crud import (
     get_meeting_data,
     get_speaker_aliases,
     init_db,
+    list_meetings,
     save_meeting_summary,
     save_to_database,
     set_meeting_title,
@@ -47,16 +46,24 @@ from ai_modules.utils.nlp_processor import process_text
 from ai_modules.ocr.ocr_processor import OCRProcessor
 from ai_modules.diarization.diarizer import assign_speaker, reset_meeting
 
-os.environ.setdefault("ENABLE_OCR", "true")
+# Screen OCR is opt-in: it reads the whole screen, so users must enable it
+# explicitly (privacy). Set ENABLE_OCR=true in the environment to turn it on.
+os.environ.setdefault("ENABLE_OCR", "false")
 os.environ.setdefault("OCR_INTERVAL_SECONDS", "3.0")
 os.environ.setdefault("OCR_CHANGE_THRESHOLD", "0.02")
 
 SAMPLE_RATE = 16000
-CHUNK_SECONDS = 3
+# 5s chunks keep sentences intact and beat real-time throughput even with two
+# concurrent sources; 30s of buffer absorbs processing spikes without the deque
+# silently dropping its oldest audio (the cause of missing mid-meeting words).
+CHUNK_SECONDS = int(os.getenv("CHUNK_SECONDS", "5"))
 CHUNK_SIZE = SAMPLE_RATE * CHUNK_SECONDS
-BUFFER_SECONDS = 8
+BUFFER_SECONDS = int(os.getenv("AUDIO_BUFFER_SECONDS", "30"))
 
-SILENCE_RMS_THRESHOLD = 0.015
+# Cheap pre-gate before VAD — only meant to skip dead-silent chunks. Real
+# speech detection is Silero VAD's job, so keep this LOW: laptop mics often
+# speak at 0.003–0.01 RMS and a 0.015 gate silently discards everything.
+SILENCE_RMS_THRESHOLD = float(os.getenv("RMS_GATE", "0.002"))
 MAX_WS_CLIENTS = 3
 OCR_EMPTY_RESULT = {"text": "", "keywords": []}
 
@@ -92,6 +99,11 @@ speaker_muted: bool = False
 speaker_enabled: bool = False  # speaker (loopback) capture consent for the meeting
 meeting_title: str = "Live FloatNote Meeting"
 control_lock: asyncio.Lock = asyncio.Lock()
+# Whisper is CPU-bound; running the MIC and SPEAKER transcriptions at the same
+# time thrashes the cores and makes BOTH pipelines fall behind real time.
+transcribe_lock: asyncio.Lock = asyncio.Lock()
+# Rate-limits the "below gate" log line per source.
+_gate_log_at: dict[str, float] = {}
 
 
 class ChatRequest(BaseModel):
@@ -186,9 +198,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(audio_collector(queue, buffer))
     asyncio.create_task(audio_collector(speaker_queue, speaker_buffer))
     asyncio.create_task(database_worker_loop())
-    asyncio.create_task(transcription_worker(SOURCE_MIC, buffer))
-    asyncio.create_task(transcription_worker(SOURCE_SPEAKER, speaker_buffer))
-    asyncio.create_task(ocr_worker())
+    asyncio.create_task(transcription_worker(SOURCE_MIC, buffer, with_ocr=True))
+    asyncio.create_task(transcription_worker(SOURCE_SPEAKER, speaker_buffer, with_ocr=False))
+    asyncio.create_task(ocr_watcher())
     print("🟡 Idle — waiting for Start. No audio is being captured.")
 
     yield
@@ -201,21 +213,27 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Only the app's own front-end may call this local API. The dev server runs at
+# localhost:5173; the packaged Electron app loads over file:// (Origin "null").
+# A random website the user visits is NOT in this list, so it cannot drive the
+# API even though the server is on the same machine.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,null",
+    ).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-model = whisper.load_model("base", download_root=_whisper_download_root())
+model = whisper.load_model("base")
 # Silero VAD: local neural speech detector. Replaces the crude RMS gate so only
 # real speech reaches Whisper (kills silence/noise hallucinations, saves CPU).
 vad_model = load_silero_vad()
@@ -249,9 +267,13 @@ def _speaker_capture_loop():
         speaker = sc.default_speaker()
         mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
         print(f"🔊 Loopback target: '{speaker.name}'")
-        with mic.recorder(samplerate=SAMPLE_RATE, channels=1, blocksize=1024) as rec:
+        # Blocking half-second reads with a ~1s device buffer: record() must be
+        # given a frame count — record(None) returns only the newest packet and
+        # silently discards the backlog (measured 18% capture). Blocking reads
+        # measured 100% capture even under load.
+        with mic.recorder(samplerate=SAMPLE_RATE, channels=1, blocksize=16384) as rec:
             while not speaker_stop.is_set():
-                data = rec.record(numframes=4096)  # blocks until available
+                data = rec.record(numframes=8192)  # blocks ~0.5s
                 if loop is None or speaker_queue.full():
                     continue
                 samples = (
@@ -353,6 +375,41 @@ async def broadcast(payload: dict):
         clients.discard(dead)
 
 
+async def ocr_watcher():
+    """Capture and broadcast screen OCR on its own cadence.
+
+    The transcription path only attaches OCR to mic utterances, so a slide
+    shown while nobody speaks would never be captured. This watcher polls the
+    screen independently while a meeting is recording and persists/broadcasts
+    only when the visible text actually changes.
+    """
+    interval = float(os.getenv("OCR_INTERVAL_SECONDS", "3.0"))
+    last_text = ""
+    while True:
+        await asyncio.sleep(interval)
+        if not recording or paused or ocr_processor is None or active_meeting_id is None:
+            continue
+        try:
+            result = await ocr_processor.process_async()
+        except Exception as exc:
+            print(f"⚠️ OCR watcher error: {exc}")
+            continue
+        text = (result.get("text") or "").strip()
+        if not text or text == last_text:
+            continue
+        last_text = text
+        print(f"🖥️ OCR update ({len(text)} chars): '{text[:60]}'")
+        try:
+            await db_queue.put(
+                {"meeting_id": active_meeting_id, "data": {"ocr": result}}
+            )
+        except asyncio.QueueFull:
+            print("⚠️ [DB Queue Full] Dropping OCR packet!")
+        await broadcast(
+            {"type": "ocr", "ocr": result, "meeting_id": active_meeting_id}
+        )
+
+
 def _drain_buffer(target_buffer: deque, count: int) -> None:
     for _ in range(min(count, len(target_buffer))):
         try:
@@ -379,67 +436,12 @@ def _detect_speech(audio_np: np.ndarray):
     return audio_np[start:end]
 
 
-async def ocr_worker():
-    """Capture + OCR the screen on its own clock while a meeting is recording.
-
-    Deliberately decoupled from speech: screen content must be captured even
-    when nobody is talking (e.g. silently reading a shared slide). Previously
-    OCR only ran piggybacked on *mic* transcriptions, so a meeting with only
-    speaker/loopback audio — or no speech at all — never OCR'd anything.
-
-    Emits the dedicated ``{"type": "ocr"}`` payload the UI listens for, and
-    persists a result only when the on-screen text actually changes.
-    """
-    print("🖥️  OCR worker started")
-    last_saved: str | None = None
-    announced_meeting: int | None = None
-    while True:
-        if not recording or paused or active_meeting_id is None or ocr_processor is None:
-            await asyncio.sleep(0.25)
-            continue
-        chunk_meeting_id = active_meeting_id
-
-        if announced_meeting != chunk_meeting_id:
-            # First tick of a new meeting: tell the UI OCR is alive so the
-            # badge reads IDLE (not DISABLED) even before any text is seen.
-            announced_meeting = chunk_meeting_id
-            last_saved = None
-            await broadcast(
-                {"type": "ocr", "ocr": OCR_EMPTY_RESULT, "meeting_id": chunk_meeting_id}
-            )
-
-        try:
-            result = await ocr_processor.process_async()
-        except Exception as exc:
-            print(f"⚠️ OCR error: {exc}")
-            await asyncio.sleep(max(1.0, ocr_processor.check_interval))
-            continue
-
-        text = (result.get("text") or "").strip()
-        if (
-            text
-            and text != last_saved
-            and recording
-            and not paused
-            and active_meeting_id == chunk_meeting_id
-        ):
-            last_saved = text
-            try:
-                await db_queue.put({"meeting_id": chunk_meeting_id, "data": {"ocr": result}})
-            except asyncio.QueueFull:
-                print("⚠️ [DB Queue Full] Dropping OCR packet!")
-            await broadcast({"type": "ocr", "ocr": result, "meeting_id": chunk_meeting_id})
-
-        await asyncio.sleep(max(0.5, ocr_processor.check_interval / 2))
-
-
-async def transcription_worker(source: str, target_buffer: deque):
+async def transcription_worker(source: str, target_buffer: deque, with_ocr: bool):
     """Continuously transcribe one audio source, persist, and broadcast.
 
     Idle unless a meeting is recording (not paused) and this source isn't muted.
     Speech is gated by VAD; for the speaker stream each utterance is diarized to
     a stable ``SPEAKER_0X`` label so the UI/DB can tell participants apart.
-    OCR runs in its own independent worker (see ``ocr_worker``), not here.
     """
     print(f"🧠 Transcription worker started for {source}")
     is_mic = source == SOURCE_MIC
@@ -458,7 +460,15 @@ async def transcription_worker(source: str, target_buffer: deque):
         audio_np = np.array(target_buffer, dtype=np.float32)[:CHUNK_SIZE]
 
         # Cheap energy pre-filter: skip dead-silent chunks without running VAD.
-        if float(np.sqrt(np.mean(audio_np**2))) <= SILENCE_RMS_THRESHOLD:
+        rms = float(np.sqrt(np.mean(audio_np**2)))
+        if rms <= SILENCE_RMS_THRESHOLD:
+            now = loop.time()
+            if rms > 0.0005 and now - _gate_log_at.get(source, 0.0) > 5:
+                _gate_log_at[source] = now
+                print(
+                    f"🎚️ {source} level {rms:.4f} below gate "
+                    f"{SILENCE_RMS_THRESHOLD} — raise input volume or lower RMS_GATE"
+                )
             _drain_buffer(target_buffer, CHUNK_SIZE // 4)
             continue
 
@@ -477,7 +487,8 @@ async def transcription_worker(source: str, target_buffer: deque):
             return model.transcribe(audio, fp16=False, language="en", temperature=0)
 
         try:
-            result = await loop.run_in_executor(None, _transcribe)
+            async with transcribe_lock:
+                result = await loop.run_in_executor(None, _transcribe)
         except Exception as transcribe_err:
             print(f"⚠️ Whisper error ({source}): {transcribe_err}")
             _drain_buffer(target_buffer, CHUNK_SIZE)
@@ -503,9 +514,12 @@ async def transcription_worker(source: str, target_buffer: deque):
             )
 
         analysis = process_text(text)
-        # OCR is handled by the dedicated ocr_worker; keep the field for
-        # payload-shape compatibility (UI and DB both skip empty OCR).
-        analysis["ocr"] = OCR_EMPTY_RESULT
+        ocr_result = (
+            await ocr_processor.process_async()
+            if with_ocr and ocr_processor is not None
+            else OCR_EMPTY_RESULT
+        )
+        analysis["ocr"] = ocr_result
         analysis["source"] = emit_source
         analysis["meeting_id"] = chunk_meeting_id
 
@@ -722,6 +736,22 @@ async def rename_speaker(meeting_id: int, request: SpeakerAliasRequest):
     return {"meeting_id": meeting_id, "aliases": aliases}
 
 
+@app.get("/meetings")
+async def list_all_meetings():
+    """Newest-first list of saved meetings, for the history view."""
+    return {"meetings": await list_meetings()}
+
+
+@app.get("/meetings/{meeting_id}/full")
+async def get_full_meeting(meeting_id: int):
+    """Full stored content of a past meeting (transcript, keywords, summary)."""
+    await wait_for_pending_meeting_writes()
+    data = await get_meeting_data(meeting_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return data
+
+
 @app.get("/meetings/latest/summary")
 async def get_latest_meeting_summary():
     await wait_for_pending_meeting_writes()
@@ -734,8 +764,7 @@ async def get_latest_meeting_summary():
         "summary": summary_result["summary"],
         "summary_source": summary_result["source"],
         "summary_model": summary_result["model"],
-        "used_groq": summary_result["used_groq"],
-        "used_huggingface": summary_result["used_huggingface"],
+        "used_llm": summary_result["used_llm"],
         "summary_error": summary_result["error"],
     }
 
@@ -752,8 +781,7 @@ async def get_meeting_summary(meeting_id: int):
         "summary": summary_result["summary"],
         "summary_source": summary_result["source"],
         "summary_model": summary_result["model"],
-        "used_groq": summary_result["used_groq"],
-        "used_huggingface": summary_result["used_huggingface"],
+        "used_llm": summary_result["used_llm"],
         "summary_error": summary_result["error"],
     }
 
@@ -788,8 +816,16 @@ async def chat_with_meeting(meeting_id: int, request: ChatRequest):
     }
 
 
+def _require_debug_enabled():
+    """Debug endpoints dump full transcripts to disk, so they are off unless
+    ENABLE_DEBUG_ENDPOINTS=true. When off we 404 to hide that they exist."""
+    if os.getenv("ENABLE_DEBUG_ENDPOINTS", "false").strip().lower() != "true":
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
 @app.get("/meetings/latest/debug/export")
 async def export_latest_meeting_debug():
+    _require_debug_enabled()
     await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload()
     debug_payload = _build_meeting_debug_payload(meeting_payload)
@@ -808,6 +844,7 @@ async def export_latest_meeting_debug():
 
 @app.get("/meetings/{meeting_id}/debug/export")
 async def export_meeting_debug(meeting_id: int):
+    _require_debug_enabled()
     await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload(meeting_id)
     debug_payload = _build_meeting_debug_payload(meeting_payload)
@@ -826,6 +863,7 @@ async def export_meeting_debug(meeting_id: int):
 
 @app.post("/meetings/latest/chat/debug")
 async def chat_with_latest_meeting_debug(request: ChatRequest):
+    _require_debug_enabled()
     await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload()
     docs = convert_to_documents(meeting_payload["items"])
@@ -853,6 +891,7 @@ async def chat_with_latest_meeting_debug(request: ChatRequest):
 
 @app.post("/meetings/{meeting_id}/chat/debug")
 async def chat_with_meeting_debug(meeting_id: int, request: ChatRequest):
+    _require_debug_enabled()
     await wait_for_pending_meeting_writes()
     meeting_payload = await load_meeting_payload(meeting_id)
     docs = convert_to_documents(meeting_payload["items"])
@@ -887,7 +926,7 @@ async def ping_client(ws: WebSocket):
             break
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8000):
+def run_server(host: str = "127.0.0.1", port: int = 8000):
     import uvicorn
 
     uvicorn.run(app, host=host, port=port)

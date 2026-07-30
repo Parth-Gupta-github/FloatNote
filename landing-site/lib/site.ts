@@ -9,7 +9,7 @@ export const siteConfig = {
   description:
     "FloatNote is a desktop-first meeting assistant that runs quietly in the background — live Whisper transcription, screen OCR, AI summaries, and a chatbot that actually knows your meeting.",
   // Change this to your production domain before deploying.
-  url: process.env.NEXT_PUBLIC_SITE_URL ?? "https://parv-tiwari-floatnote.vercel.app",
+  url: process.env.NEXT_PUBLIC_SITE_URL ?? "https://floatnote.app",
   ogImage: "/opengraph-image",
   keywords: [
     "meeting assistant",
@@ -25,13 +25,13 @@ export const siteConfig = {
     "desktop meeting recorder",
     "FloatNote",
   ],
-  author: "FloatNote",
+  author: "FloatNote Team",
   twitter: "@floatnote",
-  repo: "https://github.com/ParvTiwari/FloatNote",
+  repo: "https://github.com/Parth-Gupta-github/FloatNote",
   // Windows installer / release download. Points at GitHub releases by default —
   // swap for a direct .exe URL once you publish an installer.
   downloadWindowsUrl:
-    "https://github.com/ParvTiwari/FloatNote/releases/latest",
+    "https://github.com/Parth-Gupta-github/FloatNote/releases/latest",
   locale: "en_US",
 } as const;
 
