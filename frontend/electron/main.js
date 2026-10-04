@@ -44,17 +44,22 @@ function startBackend() {
   }
   const exe = backendExePath();
   logMain("startBackend spawning: " + exe + " exists=" + fs.existsSync(exe));
+  const cfg = readConfig();
   backendProcess = spawn(exe, [], {
     env: {
       ...process.env,
       // Where the backend reads config.json (the HF token) and caches models.
       FLOATNOTE_DATA_DIR: app.getPath("userData"),
+      // Inject the saved token so the backend has it from the very start.
+      ...(cfg.huggingface_token
+        ? { HUGGINGFACEHUB_API_TOKEN: cfg.huggingface_token }
+        : {}),
       // Avoid the Windows console UnicodeEncodeError on the backend's emoji logs.
       PYTHONIOENCODING: "utf-8",
       PYTHONUTF8: "1",
       // Screen Reader (OCR) on by default, toggleable from Settings (applies on
       // restart). Uses the bundled Tesseract engine — no separate install.
-      ENABLE_OCR: readConfig().ocr_enabled === false ? "false" : "true",
+      ENABLE_OCR: cfg.ocr_enabled === false ? "false" : "true",
       TESSERACT_CMD: path.join(process.resourcesPath, "tesseract", "tesseract.exe"),
       TESSDATA_PREFIX: path.join(process.resourcesPath, "tesseract", "tessdata"),
     },
@@ -186,7 +191,9 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    transparent: false,
+    show: true,
+    backgroundColor: "#0d1117",
+    title: "FloatNote",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -194,16 +201,24 @@ function createWindow() {
     },
   });
 
-  // Content protection excludes this window from ALL screen capture — including
-  // the OCR's own screen grab, so Screen Reader never reads FloatNote's own UI
-  // back into the meeting (it still reads the rest of the screen: slides, etc.).
-  // Side effect: the window can't be screenshotted while this is on. To capture
-  // marketing screenshots, temporarily set this to false and relaunch.
-  mainWindow.setContentProtection(true);
+  // In production builds, exclude window from capture; keep false in dev so you can take screenshots
+  if (!isDev) {
+    mainWindow.setContentProtection(true);
+  } else {
+    mainWindow.setContentProtection(false);
+  }
+
+  mainWindow.show();
+  mainWindow.focus();
 
   if (isDev) {
-    mainWindow.webContents.on("did-fail-load", () => loadDevServer(mainWindow));
-    loadDevServer(mainWindow);
+    mainWindow.loadURL(DEV_SERVER_URL).catch((err) => {
+      logMain("loadURL initial error: " + err);
+    });
+    mainWindow.webContents.on("did-fail-load", () => {
+      logMain("did-fail-load triggered, retrying loadDevServer");
+      loadDevServer(mainWindow);
+    });
     return;
   }
 
