@@ -69,16 +69,53 @@ class OCRProcessor:
             # Fallback keeps processor usable even if model is not installed.
             self._nlp = spacy.blank("en")
 
+    @staticmethod
+    def _ensure_interactive_desktop() -> None:
+        """On Windows, attach current thread to the interactive desktop station (WinSta0/Default)."""
+        if os.name == "nt":
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                hwinsta = user32.OpenWindowStationW("WinSta0", False, 0x000F037F)
+                if hwinsta:
+                    user32.SetProcessWindowStation(hwinsta)
+                hdesk = user32.OpenDesktopW("Default", 0, False, 0x000F01FF)
+                if hdesk:
+                    user32.SetThreadDesktop(hdesk)
+            except Exception:
+                pass
+
     def capture_screen(self) -> np.ndarray:
         """Capture the full screen (or configured crop) as a BGR numpy array."""
-        with mss.mss() as sct:
-            monitor = self.crop_region or sct.monitors[self.monitor_index]
-            screenshot = sct.grab(monitor)
-            frame = np.array(screenshot)
-        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        self._ensure_interactive_desktop()
+
+        # Primary: mss
+        try:
+            with mss.mss() as sct:
+                monitor = self.crop_region or sct.monitors[min(self.monitor_index, len(sct.monitors) - 1)]
+                screenshot = sct.grab(monitor)
+                frame = np.array(screenshot)
+                if frame.size > 0 and frame.mean() > 0:
+                    return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        except Exception:
+            pass
+
+        # Fallback: PIL ImageGrab
+        try:
+            from PIL import ImageGrab
+            shot = ImageGrab.grab()
+            frame = np.array(shot)
+            if frame.size > 0 and frame.mean() > 0:
+                return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        except Exception:
+            pass
+
+        return np.zeros((300, 300, 3), dtype=np.uint8)
 
     def has_slide_changed(self, prev: np.ndarray, curr: np.ndarray) -> bool:
         """Return True when frame delta exceeds the configured threshold."""
+        if prev is None or curr is None:
+            return True
         prev_small = cv2.resize(prev, self.compare_size, interpolation=cv2.INTER_AREA)
         curr_small = cv2.resize(curr, self.compare_size, interpolation=cv2.INTER_AREA)
 
@@ -96,20 +133,62 @@ class OCRProcessor:
         return change_ratio > self.change_threshold
 
     def extract_text(self, frame: np.ndarray) -> str:
-        """Run OCR on a frame and return cleaned text lines."""
+        """Run OCR on a frame and return cleaned text lines (handles dark & light modes)."""
+        if frame is None or frame.size == 0 or frame.mean() == 0:
+            return ""
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        if self.apply_threshold:
-            gray = cv2.threshold(
-                gray,
-                0,
-                255,
-                cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-            )[1]
+        # First pass: standard grayscale
+        raw_text = ""
+        try:
+            raw_text = pytesseract.image_to_string(gray, config="--oem 3 --psm 3")
+        except Exception:
+            try:
+                raw_text = pytesseract.image_to_string(gray, config=self.tesseract_config)
+            except Exception:
+                return ""
 
-        raw_text = pytesseract.image_to_string(gray, config=self.tesseract_config)
+        # If dark background or low text yield, try inverted image (critical for dark-mode slides/IDE)
+        if len(raw_text.strip()) < 10 or gray.mean() < 120:
+            try:
+                inv_gray = cv2.bitwise_not(gray)
+                inv_text = pytesseract.image_to_string(inv_gray, config="--oem 3 --psm 3")
+                if len(inv_text.strip()) > len(raw_text.strip()):
+                    raw_text = inv_text
+            except Exception:
+                pass
+
+        # Filter out FloatNote UI labels so OCR never reads FloatNote's own application window
+        UI_IGNORE_PATTERNS = {
+            "floatnote",
+            "live transcript",
+            "meeting summary",
+            "meeting chatbot",
+            "screen reader",
+            "action items",
+            "mic on",
+            "participants on",
+            "export .md",
+            "export .txt",
+            "ask something like",
+            "generate summary",
+            "real-time ai-based",
+            "meeting assistance system",
+            "business_meeting",
+            "connection connected",
+        }
+
         lines = [line.strip() for line in raw_text.splitlines()]
-        cleaned = [line for line in lines if len(line) >= self.min_text_length]
+        cleaned = []
+        for line in lines:
+            if len(line) < 2:
+                continue
+            line_lower = line.lower()
+            if any(pattern in line_lower for pattern in UI_IGNORE_PATTERNS):
+                continue
+            cleaned.append(line)
+
         return "\n".join(cleaned)
 
     def _extract_keywords(self, text: str) -> List[str]:

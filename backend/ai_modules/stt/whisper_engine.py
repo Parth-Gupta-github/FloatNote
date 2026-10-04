@@ -46,9 +46,9 @@ from ai_modules.utils.nlp_processor import process_text
 from ai_modules.ocr.ocr_processor import OCRProcessor
 from ai_modules.diarization.diarizer import assign_speaker, reset_meeting
 
-# Screen OCR is opt-in: it reads the whole screen, so users must enable it
-# explicitly (privacy). Set ENABLE_OCR=true in the environment to turn it on.
-os.environ.setdefault("ENABLE_OCR", "false")
+# Screen OCR: reads on-screen text (slides, documents) during meetings.
+# Enabled by default; toggleable dynamically in the in-app Settings.
+os.environ.setdefault("ENABLE_OCR", "true")
 os.environ.setdefault("OCR_INTERVAL_SECONDS", "3.0")
 os.environ.setdefault("OCR_CHANGE_THRESHOLD", "0.02")
 
@@ -171,6 +171,36 @@ async def database_worker_loop():
             db_queue.task_done()
 
 
+def set_ocr_active(enabled: bool) -> bool:
+    """Dynamically start or stop OCR processing without restarting the server."""
+    global ocr_processor
+    from ai_modules.utils.app_config import set_ocr_enabled
+    set_ocr_enabled(enabled)
+    if enabled:
+        if ocr_processor is None:
+            try:
+                ocr_processor = OCRProcessor(
+                    check_interval=float(os.getenv("OCR_INTERVAL_SECONDS", "3.0")),
+                    change_threshold=float(os.getenv("OCR_CHANGE_THRESHOLD", "0.02")),
+                )
+                print(
+                    f"🖥️  OCR enabled | monitor_index={ocr_processor.monitor_index} "
+                    f"interval={ocr_processor.check_interval}s"
+                )
+            except Exception as exc:
+                print(f"⚠️ Could not start OCR processor: {exc}")
+                ocr_processor = None
+    else:
+        if ocr_processor is not None:
+            try:
+                ocr_processor.stop_background()
+            except Exception:
+                pass
+            ocr_processor = None
+            print("🖥️  OCR disabled")
+    return ocr_processor is not None or enabled
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -178,20 +208,11 @@ async def lifespan(app: FastAPI):
     global loop, ocr_processor
     loop = asyncio.get_running_loop()
 
-    # Privacy-first: capture devices are NOT opened at boot. They start only
-    # when the user presses Start (see /meetings/start). The OCR processor is
-    # constructed up front but only polled by the mic worker while recording.
-    if os.getenv("ENABLE_OCR", "false").strip().lower() == "true":
-        ocr_processor = OCRProcessor(
-            check_interval=float(os.getenv("OCR_INTERVAL_SECONDS", "1.0")),
-            change_threshold=float(os.getenv("OCR_CHANGE_THRESHOLD", "0.02")),
-        )
-        print(
-            f"🖥️  OCR enabled | monitor_index={ocr_processor.monitor_index} "
-            f"interval={ocr_processor.check_interval}s"
-        )
+    from ai_modules.utils.app_config import is_ocr_enabled
+    if is_ocr_enabled():
+        set_ocr_active(True)
     else:
-        print("⚠️ OCR disabled because ENABLE_OCR is not true")
+        print("⚠️ OCR disabled via settings")
 
     # Collectors + transcription workers run for the whole process lifetime but
     # stay idle until a meeting is recording and the relevant stream is open.
@@ -375,6 +396,9 @@ async def broadcast(payload: dict):
         clients.discard(dead)
 
 
+ocr_last_text: str = ""
+
+
 async def ocr_watcher():
     """Capture and broadcast screen OCR on its own cadence.
 
@@ -383,8 +407,8 @@ async def ocr_watcher():
     screen independently while a meeting is recording and persists/broadcasts
     only when the visible text actually changes.
     """
-    interval = float(os.getenv("OCR_INTERVAL_SECONDS", "3.0"))
-    last_text = ""
+    global ocr_last_text
+    interval = float(os.getenv("OCR_INTERVAL_SECONDS", "2.0"))
     while True:
         await asyncio.sleep(interval)
         if not recording or paused or ocr_processor is None or active_meeting_id is None:
@@ -395,9 +419,9 @@ async def ocr_watcher():
             print(f"⚠️ OCR watcher error: {exc}")
             continue
         text = (result.get("text") or "").strip()
-        if not text or text == last_text:
+        if not text or text == ocr_last_text:
             continue
-        last_text = text
+        ocr_last_text = text
         print(f"🖥️ OCR update ({len(text)} chars): '{text[:60]}'")
         try:
             await db_queue.put(
@@ -588,6 +612,54 @@ async def websocket_endpoint(ws: WebSocket):
         print(f"🔴 Client disconnected. Active: {len(clients)}")
 
 
+class TokenRequest(BaseModel):
+    token: str
+
+
+@app.post("/settings/token")
+async def save_token_endpoint(request: TokenRequest):
+    """Save a HuggingFace token — persists to config.json AND hot-updates the
+    running backend so summaries and chat work immediately (no restart)."""
+    from ai_modules.utils.app_config import save_config, set_hf_token
+
+    token = request.token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Token cannot be empty.")
+    # Persist for next launch.
+    save_config({"huggingface_token": token})
+    # Hot-update so the current process uses it right away.
+    set_hf_token(token)
+    print("🔑 HuggingFace token saved and activated.")
+    return {"status": "saved", "hasToken": True}
+
+
+@app.get("/settings/token/status")
+async def token_status_endpoint():
+    """Check whether a usable HuggingFace token is configured."""
+    from ai_modules.utils.app_config import get_hf_token
+
+    return {"hasToken": bool(get_hf_token())}
+
+
+class OcrSettingRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/settings/ocr")
+async def get_ocr_setting_endpoint():
+    """Get the current OCR toggle status."""
+    from ai_modules.utils.app_config import is_ocr_enabled
+    return {"enabled": is_ocr_enabled(), "active": ocr_processor is not None}
+
+
+@app.post("/settings/ocr")
+async def set_ocr_setting_endpoint(request: OcrSettingRequest):
+    """Dynamically toggle Screen Reader (OCR) on/off."""
+    active = set_ocr_active(request.enabled)
+    await broadcast({"type": "ocr_status", "enabled": request.enabled, "active": active})
+    return {"status": "saved", "enabled": request.enabled, "active": active}
+
+
 class StartMeetingRequest(BaseModel):
     title: str | None = None
     capture_speaker: bool = False
@@ -623,6 +695,10 @@ async def start_meeting(request: StartMeetingRequest):
         paused = False
 
         start_mic_stream()
+        global ocr_last_text
+        ocr_last_text = ""
+        if ocr_processor:
+            ocr_processor._prev_frame = None
 
         speaker_enabled = bool(request.capture_speaker) and ENABLE_SPEAKER
         if speaker_enabled:
