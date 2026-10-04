@@ -103,17 +103,30 @@ Then verify the path in `backend/ai_modules/ocr/ocr_processor.py`:
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 ```
 
-### 4. Configure environment variables
+### 4. Configure environment variables & Hugging Face Token
 
-Create a `.env` file inside `backend/`:
+FloatNote uses a free Hugging Face token for AI Summarization, Meeting Chat, and Keyword Intelligence (using `meta-llama/Llama-3.1-8B-Instruct` with auto-fallbacks).
+
+#### 🔑 Step-by-Step: How to create your Hugging Face Inference Token:
+1. **Sign in / Sign up**: Go to [huggingface.co](https://huggingface.co) and create or log in to your account.
+2. **Go to Access Tokens**: Navigate to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+3. **Create New Token**:
+   - Click the **"Create new token"** button.
+   - Select **"Fine-grained"** (or **"Read"**).
+   - Set a **Token Name** (e.g., `FloatNote`).
+   - Under **Permissions** -> **Inference**: Check **"Make calls to Inference Providers"** and **"Make calls to the serverless Inference API"**.
+4. **Copy Token**: Click **Create Token** and copy the key (starts with `hf_...`).
+5. **Use in App**:
+   - In the desktop application: Open **Settings ⚙️** and paste your token in the **Hugging Face Token** input, then click **Save**.
+   - Or create a `.env` file inside `backend/`:
 
 ```env
-# Required — powers the chatbot, summaries, and keyword filtering (one model for everything)
+# Powers chatbot, summaries, and keyword filtering
 HUGGINGFACEHUB_API_TOKEN=hf_...
 HUGGINGFACE_PROVIDER=auto
 ```
 
-> 💡 All LLM features run on a **single model** (`Qwen/Qwen2.5-7B-Instruct`) through the HuggingFace router. Create a token with the "Make calls to Inference Providers" permission at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens). Without a token, summaries, chat, and keyword filtering degrade to local fallbacks.
+> 💡 Without a token, summaries and chat degrade gracefully to local NLP fallbacks.
 
 ### 5. Run everything (recommended)
 
