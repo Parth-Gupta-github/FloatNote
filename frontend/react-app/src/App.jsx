@@ -12,6 +12,7 @@ function App() {
   const [keywords, setKeywords] = useState([]);
   const [actions, setActions] = useState([]);
   const [ocr, setOcr] = useState({ text: "", keywords: [] });
+  const [ocrEnabled, setOcrEnabled] = useState(true);
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
   const [connected, setConnected] = useState(false);
   const [loadingTip, setLoadingTip] = useState(0);
@@ -68,6 +69,18 @@ function App() {
     }
   }, [chatHistory, chatLoading]);
 
+  // Fetch initial OCR toggle status from backend.
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/settings/ocr`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && typeof data.enabled === "boolean") {
+          setOcrEnabled(data.enabled);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Cycle the connecting-screen status lines while we wait for the socket.
   useEffect(() => {
     if (connected) return;
@@ -110,6 +123,11 @@ function App() {
               ...prev,
               [data.speaker_key]: data.display_name,
             }));
+            return;
+          }
+
+          if (data.type === "ocr_status") {
+            setOcrEnabled(Boolean(data.enabled));
             return;
           }
 
@@ -770,14 +788,14 @@ function App() {
                   </h2>
                   <span
                     className={`rounded-full px-4 py-1 text-sm font-semibold ${
-                      ocr.text
-                        ? "bg-emerald-100 text-emerald-700"
-                        : ocr._everReceived
-                          ? "bg-amber-100 text-amber-700"
-                          : "bg-slate-100 text-slate-500"
+                      !ocrEnabled
+                        ? "bg-slate-100 text-slate-500"
+                        : ocr.text
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-teal-100 text-teal-700"
                     }`}
                   >
-                    {ocr.text ? "ACTIVE" : ocr._everReceived ? "IDLE" : "DISABLED"}
+                    {!ocrEnabled ? "DISABLED" : ocr.text ? "ACTIVE" : "READY"}
                   </span>
                 </div>
 

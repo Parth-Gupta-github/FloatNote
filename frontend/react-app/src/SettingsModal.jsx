@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+
 // Settings for the desktop app: manage the HuggingFace token and toggle the
-// Screen Reader (OCR). Talks to Electron via the window.floatnote bridge.
+// Screen Reader (OCR). Talks to the backend API for token management and
+// Electron via the window.floatnote bridge for OCR/persistence.
 export default function SettingsModal({ open, onClose }) {
   const bridge = typeof window !== "undefined" ? window.floatnote : null;
   const [hasToken, setHasToken] = useState(false);
@@ -10,11 +13,29 @@ export default function SettingsModal({ open, onClose }) {
   const [status, setStatus] = useState("");
 
   useEffect(() => {
-    if (!open || !bridge) return;
-    bridge.getConfig().then((cfg) => {
-      setHasToken(Boolean(cfg?.hasToken));
-      setOcrEnabled(cfg?.ocrEnabled !== false);
-    });
+    if (!open) return;
+    // Check token status from backend API (works in dev + production).
+    fetch(`${API_BASE}/settings/token/status`)
+      .then((r) => r.json())
+      .then((data) => setHasToken(Boolean(data?.hasToken)))
+      .catch(() => {});
+
+    // Check OCR status from backend API
+    fetch(`${API_BASE}/settings/ocr`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && typeof data.enabled === "boolean") {
+          setOcrEnabled(data.enabled);
+        }
+      })
+      .catch(() => {
+        // Fallback to bridge if API check failed
+        if (bridge?.getConfig) {
+          bridge.getConfig().then((cfg) => {
+            setOcrEnabled(cfg?.ocrEnabled !== false);
+          });
+        }
+      });
   }, [open, bridge]);
 
   if (!open) return null;
@@ -25,17 +46,45 @@ export default function SettingsModal({ open, onClose }) {
       setStatus('That doesn\'t look like a token (should start with "hf_").');
       return;
     }
-    const res = await bridge.saveToken(value);
-    setHasToken(Boolean(res?.hasToken));
-    setToken("");
-    setStatus("Token saved.");
+    try {
+      // Save to backend API (hot-updates in-memory, immediate effect).
+      const res = await fetch(`${API_BASE}/settings/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: value }),
+      });
+      if (!res.ok) throw new Error(`Backend returned ${res.status}`);
+      // Also save via Electron bridge for persistence.
+      if (bridge?.saveToken) await bridge.saveToken(value);
+      setHasToken(true);
+      setToken("");
+      setStatus("Token saved and activated — no restart needed.");
+    } catch (err) {
+      console.error("Token save failed:", err);
+      setStatus("Could not save the token. Is the backend running?");
+    }
   }
 
   async function toggleOcr() {
     const next = !ocrEnabled;
     setOcrEnabled(next);
-    await bridge.setOcrEnabled(next);
-    setStatus("Screen Reader " + (next ? "enabled" : "disabled") + " — restart FloatNote to apply.");
+    try {
+      await fetch(`${API_BASE}/settings/ocr`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (bridge?.setOcrEnabled) {
+        await bridge.setOcrEnabled(next);
+      }
+      setStatus(`Screen Reader (OCR) ${next ? "enabled" : "disabled"} — active immediately.`);
+    } catch (err) {
+      console.error("Failed to toggle OCR:", err);
+      if (bridge?.setOcrEnabled) {
+        await bridge.setOcrEnabled(next);
+      }
+      setStatus(`Screen Reader ${next ? "enabled" : "disabled"}.`);
+    }
   }
 
   return (
@@ -46,46 +95,42 @@ export default function SettingsModal({ open, onClose }) {
           <button style={styles.close} onClick={onClose}>×</button>
         </div>
 
-        {!bridge ? (
-          <p style={styles.muted}>
-            Settings are available in the installed desktop app.
-          </p>
-        ) : (
-          <>
-            <div style={styles.section}>
-              <div style={styles.label}>HuggingFace token</div>
-              <div style={styles.muted}>
-                {hasToken ? "✅ A token is configured." : "⚠️ No token set — summaries and chat won't work."}
-              </div>
-              <input
-                style={styles.input}
-                type="password"
-                placeholder="Paste a new token (hf_...)"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-              />
-              <button style={styles.btn} onClick={saveToken}>Save token</button>
+        {/* Token section — works in both dev and desktop */}
+        <>
+          <div style={styles.section}>
+            <div style={styles.label}>HuggingFace token</div>
+            <div style={styles.muted}>
+              {hasToken ? "✅ A token is configured." : "⚠️ No token set — summaries and chat won't work."}
             </div>
+            <input
+              style={styles.input}
+              type="password"
+              placeholder="Paste a new token (hf_...)"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+            <button style={styles.btn} onClick={saveToken}>Save token</button>
+          </div>
 
-            <div style={styles.section}>
-              <div style={styles.rowBetween}>
-                <div>
-                  <div style={styles.label}>Screen Reader (OCR)</div>
-                  <div style={styles.muted}>Reads on-screen text (slides, docs) into the meeting.</div>
-                </div>
-                <button
-                  style={{ ...styles.toggle, background: ocrEnabled ? "#22c55e" : "#cbd5e1" }}
-                  onClick={toggleOcr}
-                  aria-label="toggle screen reader"
-                >
-                  <span style={{ ...styles.knob, left: ocrEnabled ? 22 : 2 }} />
-                </button>
+          {/* OCR toggle — works in both web and desktop app */}
+          <div style={styles.section}>
+            <div style={styles.rowBetween}>
+              <div>
+                <div style={styles.label}>Screen Reader (OCR)</div>
+                <div style={styles.muted}>Reads on-screen text (slides, docs) into the meeting transcript.</div>
               </div>
+              <button
+                style={{ ...styles.toggle, background: ocrEnabled ? "#22c55e" : "#cbd5e1" }}
+                onClick={toggleOcr}
+                aria-label="toggle screen reader"
+              >
+                <span style={{ ...styles.knob, left: ocrEnabled ? 22 : 2 }} />
+              </button>
             </div>
+          </div>
 
-            {status ? <div style={styles.statusMsg}>{status}</div> : null}
-          </>
-        )}
+          {status ? <div style={styles.statusMsg}>{status}</div> : null}
+        </>
       </div>
     </div>
   );
